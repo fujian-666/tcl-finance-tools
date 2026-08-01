@@ -16,8 +16,8 @@ import fetch from 'node-fetch';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ==================== ?????? ====================
-// ?????? .env ?????.env ??? .gitignore?????
+// ==================== 环境变量加载 ====================
+// 从 .env 文件加载环境变量（.env 已加入 .gitignore，不提交真实密钥）
 function loadEnvFile(file) {
   try {
     const content = fs.readFileSync(file, 'utf-8');
@@ -33,7 +33,7 @@ function loadEnvFile(file) {
       }
       if (key && !(key in process.env)) process.env[key] = val;
     }
-  } catch (_) { /* .env ???????? */ }
+  } catch (_) { /* .env 不存在时忽略 */ }
 }
 loadEnvFile(path.join(__dirname, '.env'));
 
@@ -282,12 +282,12 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
-// ==================== ?????? ====================
-// ?? /api ???? /api/health???? x-auth-token ???
+// ==================== API 鉴权 ====================
+// 除 /api/health 外的所有 /api 接口需要 x-auth-token 请求头
 const ADMIN_AUTH_TOKEN = process.env.ADMIN_AUTH_TOKEN || '';
 function requireAuth(req, res, next) {
   if (!ADMIN_AUTH_TOKEN) {
-    return res.status(500).json({ error: 'ADMIN_AUTH_TOKEN ??????? .env' });
+    return res.status(500).json({ error: 'ADMIN_AUTH_TOKEN 未配置，请在 .env 中设置' });
   }
   const token = req.headers['x-auth-token'];
   if (!token || token !== ADMIN_AUTH_TOKEN) {
@@ -817,7 +817,7 @@ function matchOATemplates(content, templates) {
 }
 
 async function callDeepSeekAI(content, matchedTemplates, allTemplates) {
-  if (!DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY ??????? .env');
+  if (!DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY 未配置，请在 .env 中设置');
   let systemPrompt;
 
   if (matchedTemplates.length > 0) {
@@ -951,7 +951,7 @@ let wxAccessToken = null;
 let wxTokenExpiry = 0;
 
 async function getAccessToken() {
-  if (!WX_APPID || !WX_SECRET) throw new Error('WX_APPID / WX_SECRET ??????? .env');
+  if (!WX_APPID || !WX_SECRET) throw new Error('WX_APPID / WX_SECRET 未配置，请在 .env 中设置');
   if (wxAccessToken && Date.now() < wxTokenExpiry) return wxAccessToken;
   const url = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${WX_APPID}&secret=${WX_SECRET}`;
   const resp = await fetch(url);
@@ -1291,12 +1291,14 @@ app.get('/api/inventory/export', async (req, res) => {
     const _NON_INVENTORY_TYPES = ['confirmation', 'signature', 'checkin'];
     
     // 完全对齐小程序 cloud.js getAllInventoryRecordsForExport 的过滤逻辑
+    // 过滤逻辑与小程序 cloud.js getAllInventoryRecordsForExport 完全一致：
+    // 1) 排除非盘点记录（打卡/签名/确认）；2) 样机需有"盘点人+产品型号"，固定资产需有"盘点人+资产代码/资产名称"
     const filteredData = rawData.filter(item => {
       if (item.recordType && _NON_INVENTORY_TYPES.includes(item.recordType)) return false;
-      return true; // no filter for export
-    console.log("[Export] total=" + rawData.length + " filtered=" + filteredData.length + " keys=" + (rawData.length > 0 ? JSON.stringify(Object.keys(rawData[0])) : "none"));
-      return item['产品型号'] || item['机身码'];
+      if (isFixedAsset) return item['盘点人'] && (item['资产代码'] || item['资产名称']);
+      return item['盘点人'] && item['产品型号'];
     });
+    console.log("[Export] total=" + rawData.length + " filtered=" + filteredData.length);
     
     if (filteredData.length === 0) {
       return res.json({ success: false, message: '没有数据可导出' });
@@ -1354,11 +1356,11 @@ app.get('/api/inventory/export', async (req, res) => {
     
     // ====== 第二步：使用与小程序 exportExcel 云函数完全一致的字段键和表头 ======
     const fieldKeys = isFixedAsset
-      ? ['序号', '资产代码', '公司代码', '资产', '资产分类描述', '资产名称', '型号', '数量', '资本化日期', '不活动日期', '资产主号文本', '库存地址', '资产类型', '报销单号', '购置日期', '购置价值', '累计折旧', '净值', '减值准备', '账面价值', '原值', '功能范围', 'WBS描述', '战区', '部门负责人', '盘点人', '盘点数量', '实盘数量', '资产状态', '使用部门', '使用人', '使用地点', '备注']
+      ? ['序号', '资产代码', '公司代码', '资产', '资产分类描述', '资产名称', '型号', '数量', '资本化日期', '不活动日期', '资产主号文本', '库存地址', '资产管理员', '资产类型', '报销单号', '购置日期', '购置价值', '累计折旧', '净值', '减值准备', '账面价值', '原值', '功能范围', 'WBS描述', '战区', '部门负责人', '盘点人', '盘点数量', '实盘数量', '资产状态', '使用部门', '使用人', '使用地点', '备注']
       : ['大区', '战区', '仓库名称', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
 
     const headerNames = isFixedAsset
-      ? ['序号', '公司代码+资产代码', '公司代码', '资产', '资产分类描述', '资产名称', '型号', '数量', '资本化日期', '不活动日期', '资产主号文本', '库存注记', '资产类型名', '固定资产报销单号', '购置资产日期', '购置价值', '累计折旧', '净值', '减值准备', '账面价值', '原值', '功能范围', 'WBS描述', '战区/部门', '部门负责人', '盘点人', '盘点数量', '实盘数量', '信息变更', '资产状态', '使用部门', '使用人', '使用地点', '备注']
+      ? ['序号', '公司代码+资产代码', '公司代码', '资产', '资产分类描述', '资产名称', '型号', '数量', '资本化日期', '不活动日期', '资产主号文本', '库存注记', '资产管理员', '资产类型名', '固定资产报销单号', '购置资产日期', '购置价值', '累计折旧', '净值', '减值准备', '账面价值', '原值', '功能范围', 'WBS描述', '战区/部门', '部门负责人', '盘点人', '盘点数量', '实盘数量', '资产状态', '使用部门', '使用人', '使用地点', '备注']
       : ['序号', '大区', '战区', '仓库名称（分品类）', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
 
     // 构建数据行，序号自动补
@@ -1495,17 +1497,19 @@ app.get('/api/inventory/export', async (req, res) => {
         y += rH;
       });
 
-      // 合计行
-      const totalStock = rows.reduce((s, r) => s + (parseInt(r[6]) || 0), 0);
-      const totalActual = rows.reduce((s, r) => s + (parseInt(r[7]) || 0), 0);
+      // 合计行（样机: 库存/实盘数在第7/8列；固定资产: 盘点数量/实盘数量在第9/10列）
+      const stockIdx = isFixedAsset ? 8 : 6;
+      const actualIdx = isFixedAsset ? 9 : 7;
+      const totalStock = rows.reduce((s, r) => s + (parseInt(r[stockIdx]) || 0), 0);
+      const totalActual = rows.reduce((s, r) => s + (parseInt(r[actualIdx]) || 0), 0);
       doc.fontSize(7).font('CN');
       doc.rect(m, y, tableW, rH).fill('#e8ecf0').fill('#1a3a5c');
       let sx = m;
       colDefs.forEach((c, ci) => {
         let val = '';
         if (ci === 0) val = '合计';
-        else if (ci === 6) val = String(totalStock);
-        else if (ci === 7) val = String(totalActual);
+        else if (ci === stockIdx) val = String(totalStock);
+        else if (ci === actualIdx) val = String(totalActual);
         doc.text(val, sx + 2, y + 3, { width: c.w - 4, align: 'center', lineBreak: false });
         doc.moveTo(sx, y).lineTo(sx, y + rH).stroke('#b0b8c0');
         sx += c.w;
@@ -1632,6 +1636,99 @@ app.get('/api/inventory/stats', async (req, res) => {
     });
   } catch (err) {
     res.json({ success: false, message: err.message });
+  }
+});
+
+// ==================== 盘点进度/差异看板 ====================
+const NON_INVENTORY_TYPES = ['confirmation', 'signature', 'checkin'];
+
+function aggregateDashboard(records, isFixed) {
+  const targetKey = isFixed ? '盘点数量' : '库存';
+  const actualKey = isFixed ? '实盘数量' : '实盘数';
+  const zoneKey = '战区';
+  const storeKey = isFixed ? '库存地址' : '仓库名称';
+  const userKey = '盘点人';
+
+  // 与非盘点记录过滤逻辑保持一致
+  const valid = (records || []).filter(r => {
+    if (r.recordType && NON_INVENTORY_TYPES.includes(r.recordType)) return false;
+    if (isFixed) return r['盘点人'] && (r['资产代码'] || r['资产名称']);
+    return r['盘点人'] && r['产品型号'];
+  });
+
+  const newEntry = (name) => ({ name, total: 0, scanned: 0, unscanned: 0, completed: 0, inProgress: 0, diff: 0, stock: 0, actual: 0 });
+  const summary = newEntry('全部');
+  const zoneMap = new Map(), storeMap = new Map(), userMap = new Map();
+
+  valid.forEach(r => {
+    const target = parseInt(r[targetKey]) || 0;
+    const actual = parseInt(r[actualKey]) || 0;
+    const scanned = actual > 0;
+    const completed = target > 0 && actual >= target;
+    const diff = target - actual;
+
+    const entries = [
+      summary,
+      (zoneMap.get(r[zoneKey]) || zoneMap.set(r[zoneKey], newEntry(r[zoneKey] || '未标注')).get(r[zoneKey])),
+      (storeMap.get(r[storeKey]) || storeMap.set(r[storeKey], newEntry(r[storeKey] || '未标注')).get(r[storeKey])),
+      (userMap.get(r[userKey]) || userMap.set(r[userKey], newEntry(r[userKey] || '未知')).get(r[userKey]))
+    ];
+
+    entries.forEach(e => {
+      e.total++; e.stock += target; e.actual += actual; e.diff += diff;
+      if (scanned) e.scanned++; else e.unscanned++;
+      if (completed) e.completed++; else if (scanned) e.inProgress++;
+    });
+  });
+
+  const sortByTotal = arr => arr.sort((a, b) => b.total - a.total);
+  const rate = (scanned, total) => total > 0 ? Math.round((scanned / total) * 100) : 0;
+
+  return {
+    summary: { ...summary, scannedRate: rate(summary.scanned, summary.total) },
+    byZone: sortByTotal([...zoneMap.values()]),
+    byStore: sortByTotal([...storeMap.values()]),
+    byUser: sortByTotal([...userMap.values()])
+  };
+}
+
+// 30 秒内存缓存，避免每次刷新都全量拉取云数据库
+const dashboardCache = new Map();
+function getDashboardCached(collectionName, conditions) {
+  const key = collectionName + '|' + JSON.stringify(conditions);
+  const hit = dashboardCache.get(key);
+  if (hit && Date.now() - hit.time < 30000) return hit.data;
+  return null;
+}
+function setDashboardCache(collectionName, conditions, data) {
+  const key = collectionName + '|' + JSON.stringify(conditions);
+  dashboardCache.set(key, { time: Date.now(), data });
+  // 简单清理，防止缓存无限增长
+  if (dashboardCache.size > 50) {
+    const oldest = [...dashboardCache.entries()].sort((a, b) => a[1].time - b[1].time)[0];
+    dashboardCache.delete(oldest[0]);
+  }
+}
+
+app.get('/api/inventory/dashboard', async (req, res) => {
+  try {
+    const collectionName = req.query.collection || 'fixed_asset_records';
+    const conditions = {};
+    if (req.query.zone) conditions['战区'] = req.query.zone;
+
+    const cached = getDashboardCached(collectionName, conditions);
+    if (cached) {
+      return res.json({ success: true, data: cached, cached: true });
+    }
+
+    const raw = await fetchAllRecords(collectionName, conditions);
+    const isFixed = collectionName === 'fixed_asset_records';
+    const data = aggregateDashboard(raw, isFixed);
+    setDashboardCache(collectionName, conditions, data);
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('看板聚合失败:', err);
+    res.json({ success: false, message: '看板数据获取失败：' + err.message });
   }
 });
 

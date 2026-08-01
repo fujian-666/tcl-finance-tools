@@ -23,3 +23,5 @@ deepseek_monitor.log
 .DS_Store
 Thumbs.db
 *.swp
+# TypeScript 构建缓存
+.cache/

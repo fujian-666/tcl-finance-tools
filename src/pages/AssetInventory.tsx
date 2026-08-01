@@ -1,12 +1,16 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../lib/api';
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, Cell,
+} from 'recharts';
 
-// ??????????? Vite ??? 3004????? /api
+// 后端 API 直连：Vite 开发代理到 3004，使用相对路径 /api
 const INVENTORY_API_BASE = '';
 
 export default function AssetInventory() {
-  const [activeTab, setActiveTab] = useState<'import' | 'export' | 'photos'>('import');
+  const [activeTab, setActiveTab] = useState<'import' | 'export' | 'photos' | 'dashboard'>('import');
   const [stats, setStats] = useState<{ fixed_asset_records: number; inventory_records: number } | null>(null);
   const [photos, setPhotos] = useState<any[]>([]);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
@@ -126,8 +130,12 @@ export default function AssetInventory() {
     try {
       const res = await apiFetch(`${INVENTORY_API_BASE}/api/inventory/export?collection=inventory_records&format=csv`);
       const text = await res.text();
-      const lines = text.split('\n').slice(1).filter(l => l.trim());
-      const stores = [...new Set(lines.map(l => l.split(',')[3]?.replace(/"/g, '') || '').filter(Boolean))].sort();
+      // 用 xlsx 解析 CSV（正确处理引号包裹字段，避免备注含逗号时列错位）
+      const XLSX = await import('xlsx');
+      const wb = XLSX.read(text, { type: 'string' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = sheet ? XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false }) : [];
+      const stores = [...new Set(rows.slice(1).map(r => String((r as unknown[])[3] || '').trim()).filter(Boolean))].sort();
       setStoreList(stores);
       setShowStorePicker(true);
     } catch { alert('加载门店列表失败'); }
@@ -189,7 +197,7 @@ export default function AssetInventory() {
   const downloadPhoto = async (fileID: string) => {
     try {
       const res = await apiFetch(`${INVENTORY_API_BASE}/api/inventory/photo/download?fileID=${encodeURIComponent(fileID)}`);
-      if (!res.ok) { alert('?????HTTP ' + res.status); return; }
+      if (!res.ok) { alert('下载失败（HTTP ' + res.status + '）'); return; }
       const blob = await res.blob();
       const cd = res.headers.get('Content-Disposition') || '';
       const m = cd.match(/filename\*=(?:UTF-8''|utf-8'')(.+)/i) || cd.match(/filename=(.+)/);
@@ -200,7 +208,7 @@ export default function AssetInventory() {
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      alert('?????' + (err as Error).message);
+      alert('下载失败：' + (err as Error).message);
     }
   };
 
@@ -285,6 +293,16 @@ export default function AssetInventory() {
           >
             🖼️ 照片管理
           </button>
+          <button
+            onClick={() => { setActiveTab('dashboard'); setPhotos([]); }}
+            className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all duration-300 ${
+              activeTab === 'dashboard'
+                ? 'bg-accent-purple/20 text-accent-purple border border-accent-purple/30'
+                : 'bg-white/[0.02] text-text-secondary border border-white/[0.04] hover:bg-white/[0.04]'
+            }`}
+          >
+            📊 进度看板
+          </button>
         </div>
       </div>
 
@@ -309,6 +327,7 @@ export default function AssetInventory() {
         </div>
       </div>
 
+      {activeTab === 'dashboard' && <InventoryDashboard />}
       {activeTab === 'import' && (
         <div className="space-y-6">
           <div className="glass-card p-6 border-l-4 border-accent-blue">
@@ -689,6 +708,269 @@ export default function AssetInventory() {
             </ul>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ==================== 盘点进度/差异看板 ====================
+interface DashEntry {
+  name: string;
+  total: number;
+  scanned: number;
+  unscanned: number;
+  completed: number;
+  inProgress: number;
+  diff: number;
+  stock: number;
+  actual: number;
+}
+
+interface DashData {
+  summary: DashEntry & { scannedRate: number };
+  byZone: DashEntry[];
+  byStore: DashEntry[];
+  byUser: DashEntry[];
+}
+
+const DASH_COLORS = {
+  done: '#10b981',
+  doing: '#f59e0b',
+  undone: '#ef4444',
+  diff: '#8b5cf6',
+};
+
+function DashCard({ label, value, color, sub }: { label: string; value: number | string; color: string; sub?: string }) {
+  return (
+    <div className="glass-card p-4">
+      <p className="text-[11px] text-text-muted mb-1.5">{label}</p>
+      <p className="text-xl font-bold" style={{ color }}>{value}</p>
+      {sub && <p className="text-[10px] text-text-muted mt-1">{sub}</p>}
+    </div>
+  );
+}
+
+function DashProgressBar({ value, color }: { value: number; color: string }) {
+  return (
+    <div className="w-full h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(100, Math.max(0, value))}%`, background: color }} />
+    </div>
+  );
+}
+
+function DashTable({ title, entries }: { title: string; entries: DashEntry[] }) {
+  if (!entries || entries.length === 0) return null;
+  return (
+    <div className="glass-card p-6">
+      <h3 className="text-base font-semibold text-text-primary mb-4">{title}</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-text-muted border-b border-white/[0.06]">
+              <th className="text-left py-2 pr-3 font-medium">名称</th>
+              <th className="text-right py-2 px-2 font-medium">总数</th>
+              <th className="text-right py-2 px-2 font-medium">已盘</th>
+              <th className="text-right py-2 px-2 font-medium">未盘</th>
+              <th className="text-right py-2 px-2 font-medium">盘满</th>
+              <th className="text-right py-2 px-2 font-medium">差异</th>
+              <th className="text-left py-2 pl-3 font-medium w-40">进度</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((e) => {
+              const rate = e.total ? Math.round((e.scanned / e.total) * 100) : 0;
+              const barColor = e.scanned >= e.total ? DASH_COLORS.done : e.scanned > 0 ? DASH_COLORS.doing : DASH_COLORS.undone;
+              return (
+                <tr key={e.name} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                  <td className="py-2.5 pr-3 text-text-primary">{e.name}</td>
+                  <td className="py-2.5 px-2 text-right text-text-secondary">{e.total}</td>
+                  <td className="py-2.5 px-2 text-right text-accent-green">{e.scanned}</td>
+                  <td className="py-2.5 px-2 text-right text-red-400">{e.unscanned}</td>
+                  <td className="py-2.5 px-2 text-right text-accent-blue">{e.completed}</td>
+                  <td className={`py-2.5 px-2 text-right font-semibold ${e.diff > 0 ? 'text-red-400' : e.diff < 0 ? 'text-accent-green' : 'text-text-muted'}`}>
+                    {e.diff > 0 ? `-${e.diff}` : e.diff < 0 ? `+${-e.diff}` : '0'}
+                  </td>
+                  <td className="py-2.5 pl-3">
+                    <div className="flex items-center gap-2">
+                      <DashProgressBar value={rate} color={barColor} />
+                      <span className="text-[10px] text-text-muted w-9 text-right">{rate}%</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function InventoryDashboard() {
+  const [collection, setCollection] = useState<'fixed_asset_records' | 'inventory_records'>('fixed_asset_records');
+  const [zone, setZone] = useState('');
+  const [zoneList, setZoneList] = useState<string[]>([]);
+  const [data, setData] = useState<DashData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const isFixed = collection === 'fixed_asset_records';
+
+  const load = async (col: string, z: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      let url = `${INVENTORY_API_BASE}/api/inventory/dashboard?collection=${col}`;
+      if (z) url += `&zone=${encodeURIComponent(z)}`;
+      const res = await apiFetch(url);
+      const json = await res.json();
+      if (json.success) {
+        setData(json.data);
+        if (!z && json.data.byZone) {
+          setZoneList(json.data.byZone.map((x: DashEntry) => x.name));
+        }
+      } else {
+        setError(json.message || '看板数据获取失败');
+      }
+    } catch (err) {
+      setError('看板数据获取失败：' + (err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(collection, zone); }, [collection, zone]);
+
+  const summary = data?.summary;
+  const chartData = data?.byZone || [];
+  const diffData = chartData.length > 0 ? chartData : (data?.byStore || []).slice(0, 20);
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      {/* 控制栏 */}
+      <div className="glass-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex gap-2">
+          <button
+            onClick={() => { setCollection('fixed_asset_records'); setZone(''); }}
+            className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 ${
+              isFixed
+                ? 'bg-accent-blue/20 text-accent-blue border border-accent-blue/30'
+                : 'bg-white/[0.02] text-text-secondary border border-white/[0.04] hover:bg-white/[0.04]'
+            }`}
+          >
+            🏢 固定资产
+          </button>
+          <button
+            onClick={() => { setCollection('inventory_records'); setZone(''); }}
+            className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 ${
+              !isFixed
+                ? 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30'
+                : 'bg-white/[0.02] text-text-secondary border border-white/[0.04] hover:bg-white/[0.04]'
+            }`}
+          >
+            📦 样机盘点
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={zone}
+            onChange={(e) => setZone(e.target.value)}
+            className="px-3 py-2 rounded-xl text-sm bg-black/30 border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-purple/50 transition-colors [color-scheme:dark]"
+          >
+            <option value="">全部战区</option>
+            {zoneList.map((z) => <option key={z} value={z}>{z}</option>)}
+          </select>
+          <button
+            onClick={() => load(collection, zone)}
+            className="px-4 py-2 rounded-xl text-sm font-medium bg-white/[0.03] text-text-secondary border border-white/[0.06] hover:bg-white/[0.06] hover:text-text-primary transition-all duration-300"
+          >
+            🔄 刷新
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">{error}</div>
+      )}
+
+      {loading && (
+        <div className="glass-card p-10 text-center text-text-muted text-sm">看板加载中...</div>
+      )}
+
+      {data && summary && (
+        <>
+          {/* 汇总卡片 */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <DashCard label="总底稿" value={summary.total} color="#3b82f6" />
+            <DashCard label="已盘" value={summary.scanned} color="#10b981" />
+            <DashCard label="未盘" value={summary.unscanned} color="#ef4444" />
+            <DashCard label="盘满" value={summary.completed} color="#06b6d4" />
+            <DashCard label="盘点中" value={summary.inProgress} color="#f59e0b" />
+            <DashCard
+              label="差异（应盘-实盘）"
+              value={summary.diff > 0 ? `-${summary.diff}` : summary.diff < 0 ? `+${-summary.diff}` : '0'}
+              color={summary.diff > 0 ? '#ef4444' : summary.diff < 0 ? '#10b981' : '#64748b'}
+            />
+          </div>
+
+          {/* 完成率 */}
+          <div className="glass-card p-5">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-text-muted">整体盘点完成率</span>
+              <span className="text-lg font-bold text-accent-green">{summary.scannedRate}%</span>
+            </div>
+            <DashProgressBar
+              value={summary.scannedRate}
+              color={summary.scannedRate >= 100 ? DASH_COLORS.done : summary.scannedRate > 0 ? DASH_COLORS.doing : DASH_COLORS.undone}
+            />
+            <p className="text-[11px] text-text-muted mt-2">
+              已盘 {summary.scanned}/{summary.total} 条 · 盘满 {summary.completed} 条 · 盘点中 {summary.inProgress} 条 · 未盘 {summary.unscanned} 条
+            </p>
+          </div>
+
+          {/* 图表 */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="glass-card p-5">
+              <h3 className="text-sm font-semibold text-text-primary mb-3">按战区盘点进度</h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 5, right: 5, bottom: 40, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                    <XAxis dataKey="name" tick={{ fill: '#64748B', fontSize: 10 }} angle={-25} textAnchor="end" interval={0} />
+                    <YAxis tick={{ fill: '#64748B', fontSize: 11 }} allowDecimals={false} />
+                    <Tooltip contentStyle={{ backgroundColor: '#1A1A2E', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, color: '#F1F5F9', fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="completed" name="盘满" stackId="a" fill={DASH_COLORS.done} />
+                    <Bar dataKey="inProgress" name="盘点中" stackId="a" fill={DASH_COLORS.doing} />
+                    <Bar dataKey="unscanned" name="未盘" stackId="a" fill={DASH_COLORS.undone} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <div className="glass-card p-5">
+              <h3 className="text-sm font-semibold text-text-primary mb-3">差异数量（应盘-实盘）</h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={diffData} margin={{ top: 5, right: 5, bottom: 40, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                    <XAxis dataKey="name" tick={{ fill: '#64748B', fontSize: 10 }} angle={-25} textAnchor="end" interval={0} />
+                    <YAxis tick={{ fill: '#64748B', fontSize: 11 }} allowDecimals={false} />
+                    <Tooltip contentStyle={{ backgroundColor: '#1A1A2E', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, color: '#F1F5F9', fontSize: 12 }} />
+                    <Bar dataKey="diff" name="差异" fill={DASH_COLORS.diff}>
+                      {diffData.map((d) => (
+                        <Cell key={d.name} fill={d.diff > 0 ? '#ef4444' : d.diff < 0 ? '#10b981' : '#64748b'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          {/* 明细表 */}
+          <DashTable title={isFixed ? '按存放地点（库存地址）' : '按门店（仓库名称）'} entries={data.byStore} />
+          <DashTable title="按盘点人" entries={data.byUser} />
+        </>
       )}
     </div>
   );

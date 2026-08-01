@@ -47,7 +47,7 @@ export const tools: Tool[] = [
     fullDescription: '自动登录TCL FSS财务共享系统，定时查询长沙、福州等账户的异常收款未录入数据，通过飞书即时消息推送给指定财务人员，确保异常收款及时被发现和处理，避免资金滞留风险。',
     category: '数据处理',
     tag: 'Check',
-    icon: '�',
+    icon: '🔔',
     gradient: 'cyan',
     responseTime: 8,
     version: 'v1.0.0',
@@ -120,7 +120,7 @@ export const tools: Tool[] = [
     gradient: 'orange',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 1,
+    callCount: 6,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -143,7 +143,7 @@ export const tools: Tool[] = [
     gradient: 'cyan',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 11,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -166,7 +166,7 @@ export const tools: Tool[] = [
     gradient: 'purple',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 6,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -189,7 +189,7 @@ export const tools: Tool[] = [
     gradient: 'blue',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 9,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -212,7 +212,7 @@ export const tools: Tool[] = [
     gradient: 'green',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 7,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -235,7 +235,7 @@ export const tools: Tool[] = [
     gradient: 'purple',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 1,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -281,7 +281,7 @@ export const tools: Tool[] = [
     gradient: 'green',
     responseTime: 8,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 6,
     status: 'online',
     features: [
       '飞书OA审批批量处理',
@@ -304,7 +304,7 @@ export const tools: Tool[] = [
     gradient: 'green',
     responseTime: 12,
     version: 'v1.0.0',
-    callCount: 0,
+    callCount: 1,
     status: 'online',
     features: [
       '自动登录TOF财务系统',
@@ -319,12 +319,12 @@ export const tools: Tool[] = [
 ];
 
 export const platformStats = {
-  totalTools: 12,
-  totalCalls: 33,
+  totalTools: 13,
+  totalCalls: 78,
   weeklyGrowth: 10.5,
   toolGrowth: 33.3,
   platformVersion: 'v2.0.0',
-  lastUpdated: '2026-07-20',
+  lastUpdated: '2026-08-01',
   status: 'Stable' as const,
 };
 
