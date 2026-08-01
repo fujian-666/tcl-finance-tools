@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 环境变量与密钥（禁止提交）
+.env
+.env.local
+
+# 运行时数据
+logs/
+uploads/
+*.log
+oa_learned/
+oa_templates.json
+oa_attachments/
+oa_browser_data/
+oa_browser_data2/
+call_counts.json
+monitor_data.json
+deepseek_monitor.log
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.swp

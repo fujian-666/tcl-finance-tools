@@ -1,0 +1,41 @@
+module.exports = {
+  apps: [
+    {
+      name: 'tcl-backend',
+      script: 'server.js',
+      cwd: __dirname,
+      max_memory_restart: '300M',
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 3000,
+      kill_timeout: 5000,
+      watch: false,
+      env: {
+        NODE_ENV: 'production',
+        PORT: '3004',
+        PYTHONUNBUFFERED: '1',
+        PATH: 'C:\\Users\\FJ\\AppData\\Local\\Python\\pythoncore-3.14-64;C:\\Users\\FJ\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts;C:\\Users\\FJ\\Trae\\.venv\\Scripts;C:\\Program Files\\nodejs;' + (process.env.PATH || ''),
+        PLAYWRIGHT_BROWSERS_PATH: 'C:\\Users\\FJ\\AppData\\Local\\ms-playwright',
+      },
+      error_file: 'C:\\Users\\FJ\\.pm2\\logs\\tcl-backend-error.log',
+      out_file: 'C:\\Users\\FJ\\.pm2\\logs\\tcl-backend-out.log',
+    },
+    {
+      name: 'tcl-frontend',
+      script: '.\\node_modules\\vite\\bin\\vite.js',
+      args: '--host 0.0.0.0',
+      cwd: __dirname,
+      max_memory_restart: '500M',
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 3000,
+      kill_timeout: 5000,
+      watch: false,
+      env: {
+        NODE_ENV: 'production',
+      },
+      error_file: 'C:\\Users\\FJ\\.pm2\\logs\\tcl-frontend-error.log',
+      out_file: 'C:\\Users\\FJ\\.pm2\\logs\\tcl-frontend-out.log',
+    },
+  ],
+};
