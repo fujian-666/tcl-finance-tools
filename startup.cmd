@@ -2,7 +2,7 @@
 cd /d C:\Users\FJ\Trae\tcl-finance-tools
 
 REM Kill any lingering node processes on our ports (safety net)
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3001.*LISTENING"') do taskkill /F /PID %%a >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3004.*LISTENING"') do taskkill /F /PID %%a >nul 2>&1
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8888.*LISTENING"') do taskkill /F /PID %%a >nul 2>&1
 
 REM Small delay to let ports release

@@ -96,6 +96,20 @@ function drawTable(doc, headers, rows, colWidths, startY) {
   return y;
 }
 
+// 分页获取集合全部记录（cloudbase 单次 get 默认最多 100 条）
+async function fetchAllRecords(collectionName, maxLimit = 100) {
+  let all = []
+  let offset = 0
+  for (;;) {
+    const res = await db.collection(collectionName).skip(offset).limit(maxLimit).get()
+    const batch = (res.data || []).map(r => r.data || r)
+    all = all.concat(batch)
+    if (batch.length < maxLimit) break
+    offset += maxLimit
+  }
+  return all
+}
+
 async function generatePDF(collectionName, reportTitle, subtitle, headers, rows, filename, collectionLabel) {
   const doc = new PDFDocument({ margin: 40, size: 'A4' });
   doc.registerFont('CN', FONT_PATH);
@@ -156,28 +170,27 @@ async function generatePDF(collectionName, reportTitle, subtitle, headers, rows,
 
 console.log('=== 生成盘点报告PDF ===\n');
 
-// 固定资产
-const fixedResult = await db.collection('fixed_asset_records').get();
-const fixedData = fixedResult.data.map(r => r.data || r);
-const fixedHeaders = ['序号', '资产代码', '资产名称', '型号', '数量', '资产分类', '战区', '盘点人', '盘点数量', '实盘数量', '资产状态', '使用部门', '使用人', '使用地点'];
+// 固定资产（列与 server.js /api/inventory/export?format=pdf 完全一致）
+const fixedData = await fetchAllRecords('fixed_asset_records');
+const fixedHeaders = ['序号', '资产代码', '资产名称', '资产分类', '型号', '购置价值', '净值', '战区', '盘点数量', '实盘数量', '资产状态', '备注'];
 const fixedRows = fixedData.map((row, i) => [
-  i + 1, row['资产代码'] || '', row['资产名称'] || '', row['型号'] || '', row['数量'] || '',
-  row['资产分类'] || '', row['战区'] || '', row['盘点人'] || '',
-  row['盘点数量'] || '', row['实盘数量'] || '', row['资产状态'] || '',
-  row['使用部门'] || '', row['使用人'] || '', row['使用地点'] || ''
+  i + 1, row['资产代码'] || '', row['资产名称'] || '', row['资产分类描述'] || row['资产分类'] || '',
+  row['型号'] || '', row['购置价值'] != null ? String(row['购置价值']) : '',
+  row['净值'] != null ? String(row['净值']) : '', row['战区'] || '',
+  String(parseInt(row['盘点数量']) || 0), String(parseInt(row['实盘数量']) || 0),
+  row['资产状态'] || '', row['备注'] || ''
 ]);
 await generatePDF('fixed_asset_records', '固定资产盘点报告', '华南大区 · 运营资产盘点', fixedHeaders, fixedRows, '固定资产盘点报告.pdf', '固定资产');
 console.log('✅ 固定资产盘点报告.pdf');
 
-// 样机盘点
-const invResult = await db.collection('inventory_records').get();
-const invData = invResult.data.map(r => r.data || r);
-const invHeaders = ['大区', '战区', '仓库名称', '品类', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
-const invRows = invData.map(row => [
-  row['大区'] || '', row['战区'] || '', row['仓库名称'] || '',
-  row['品类'] || '', row['产品型号'] || '',
-  row['库存'] || '', row['实盘数'] || '', row['机身码'] || '',
-  row['备注'] || '', row['盘点人'] || ''
+// 样机盘点（列与 server.js /api/inventory/export?format=pdf 完全一致）
+const invData = await fetchAllRecords('inventory_records');
+const invHeaders = ['序号', '大区', '战区', '仓库名称', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
+const invRows = invData.map((row, i) => [
+  i + 1, row['大区'] || '', row['战区'] || '', row['仓库名称'] || '',
+  row['品类'] || row['产品线'] || '', row['产品型号'] || '',
+  String(parseInt(row['库存']) || 0), String(parseInt(row['实盘数']) || 0),
+  row['机身码'] || '', row['备注'] || '', row['盘点人'] || ''
 ]);
 await generatePDF('inventory_records', '样机盘点报告', '华南大区 · 运营资产盘点', invHeaders, invRows, '样机盘点报告.pdf', '样机盘点');
 console.log('✅ 样机盘点报告.pdf');

@@ -18,7 +18,7 @@ start "TCL-Frontend" /MIN cmd /k "cd /d %~dp0 && set PATH=%PYTHON_PATH%;%NODE_PA
 timeout /t 3 /nobreak >nul
 echo.
 echo ============================================
-echo   Backend:  http://localhost:3003
+echo   Backend:  http://localhost:3004
 echo   Frontend: http://localhost:8888
 echo ============================================
 echo.
