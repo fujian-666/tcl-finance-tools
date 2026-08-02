@@ -81,7 +81,6 @@ export default function AssetInventory() {
         return;
       }
 
-      const contentType = res.headers.get('Content-Type') || '';
       const blob = await res.blob();
       const contentDisposition = res.headers.get('Content-Disposition');
       let filename = `export.${format}`;
