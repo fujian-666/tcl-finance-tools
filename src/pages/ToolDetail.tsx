@@ -700,7 +700,7 @@ export default function ToolDetail() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-8">
         <div className="glass-card p-5 group hover:border-accent-blue/20 transition-all duration-500">
           <p className="text-xs text-text-muted mb-2">响应时间</p>
-          <p className={`text-2xl font-bold tracking-tight ${statColorMap[tool.gradient] || ''}`}>{tool.responseTime}<span className="text-sm font-normal text-text-muted ml-1">ms</span></p>
+          <p className={`text-2xl font-bold tracking-tight ${statColorMap[tool.gradient] || ''}`}>{tool.responseTime}<span className="text-sm font-normal text-text-muted ml-1">分钟</span></p>
         </div>
         <div className="glass-card p-5 group hover:border-accent-cyan/20 transition-all duration-500">
           <p className="text-xs text-text-muted mb-2">版本号</p>

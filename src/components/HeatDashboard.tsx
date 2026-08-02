@@ -26,10 +26,17 @@ const monthLabels = [
 
 const colorMap = ['#3B82F6', '#06B6D4', '#8B5CF6', '#F59E0B', '#10B981', '#F97316'];
 
-export default function HeatDashboard() {
+interface HeatDashboardProps {
+  callCounts?: Record<string, number>;
+}
+
+export default function HeatDashboard({ callCounts = {} }: HeatDashboardProps) {
   const [timeRange, setTimeRange] = useState<TimeRange>('7D');
 
-  const sortedTools = [...tools].sort((a, b) => b.callCount - a.callCount);
+  // 排序用实时调用次数（未取到实时数据时回退静态值）
+  const sortedTools = [...tools].sort((a, b) =>
+    (callCounts[b.id] ?? b.callCount) - (callCounts[a.id] ?? a.callCount)
+  );
 
   const chartData =
     timeRange === '7D'

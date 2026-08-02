@@ -69,11 +69,6 @@ const tagColorMap: Record<string, string> = {
 };
 
 // 默认日期范围：本月（本地时区）
-const now = new Date();
-const pad = (n: number) => String(n).padStart(2, '0');
-const defaultEndDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-const defaultStartDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
-const defaultYearStartDate = `${now.getFullYear()}-01-01`;
 
 export default function ToolCard({ tool, index }: ToolCardProps) {
   const navigate = useNavigate();
@@ -94,21 +89,6 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
 
   const isMonitor = tool.id === 'deepseek-monitor';
   const isInvoiceOcr = tool.id === 'invoice-ocr';
-  const isSubsidy = tool.id === 'subsidy-tracking';
-  const isFreeze = tool.id === 'settlement-freeze';
-  const isGrossProfit = tool.id === 'settlement-gross-profit';
-  const isAdjust = tool.id === 'settlement-adjust';
-  const isCashApp = tool.id === 'cash-application-query';
-  const [subStartDate, setSubStartDate] = useState(defaultStartDate);
-  const [subEndDate, setSubEndDate] = useState(defaultEndDate);
-  const [freezeStartDate, setFreezeStartDate] = useState(defaultStartDate);
-  const [freezeEndDate, setFreezeEndDate] = useState(defaultEndDate);
-  const [grossProfitStartDate, setGrossProfitStartDate] = useState(defaultStartDate);
-  const [grossProfitEndDate, setGrossProfitEndDate] = useState(defaultEndDate);
-  const [adjustStartDate, setAdjustStartDate] = useState(defaultStartDate);
-  const [adjustEndDate, setAdjustEndDate] = useState(defaultEndDate);
-  const [cashStartDate, setCashStartDate] = useState(defaultYearStartDate);
-  const [cashEndDate, setCashEndDate] = useState(defaultEndDate);
 
   // 检查工具初始状态
   useEffect(() => {
@@ -332,12 +312,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
     setLogs([]);
 
     try {
-      const body = isSubsidy ? JSON.stringify({ startDate: subStartDate, endDate: subEndDate })
-        : isFreeze ? JSON.stringify({ startDate: freezeStartDate, endDate: freezeEndDate })
-        : isGrossProfit ? JSON.stringify({ startDate: grossProfitStartDate, endDate: grossProfitEndDate })
-        : isAdjust ? JSON.stringify({ startDate: adjustStartDate, endDate: adjustEndDate })
-        : isCashApp ? JSON.stringify({ startDate: cashStartDate, endDate: cashEndDate })
-        : undefined;
+      const body = undefined;
       const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/run`, {
         method: 'POST',
         headers: body ? { 'Content-Type': 'application/json' } : undefined,
@@ -420,17 +395,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
     return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
   };
 
-  const navigatePath = isSubsidy
-    ? `/tool/${tool.id}?startDate=${subStartDate}&endDate=${subEndDate}`
-    : isFreeze
-      ? `/tool/${tool.id}?startDate=${freezeStartDate}&endDate=${freezeEndDate}`
-      : isGrossProfit
-        ? `/tool/${tool.id}?startDate=${grossProfitStartDate}&endDate=${grossProfitEndDate}`
-        : isAdjust
-          ? `/tool/${tool.id}?startDate=${adjustStartDate}&endDate=${adjustEndDate}`
-          : isCashApp
-            ? `/tool/${tool.id}?startDate=${cashStartDate}&endDate=${cashEndDate}`
-            : `/tool/${tool.id}`;
+  const navigatePath = `/tool/${tool.id}`;
 
   return (
     <div
@@ -540,133 +505,8 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
         </div>
       )}
 
-      {isSubsidy && (
-        <div className="mb-5 p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            日期范围
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              value={subStartDate}
-              onChange={(e) => setSubStartDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-purple/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-            <span className="text-[10px] text-text-muted">~</span>
-            <input
-              type="date"
-              value={subEndDate}
-              onChange={(e) => setSubEndDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-purple/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-          </div>
-        </div>
-      )}
-      {isFreeze && (
-        <div className="mb-5 p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            日期范围（大区=华南大区, 战区=全选, 渠道=连锁, 产品线=全选）
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              value={freezeStartDate}
-              onChange={(e) => setFreezeStartDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-blue/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-            <span className="text-[10px] text-text-muted">~</span>
-            <input
-              type="date"
-              value={freezeEndDate}
-              onChange={(e) => setFreezeEndDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-blue/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-          </div>
-        </div>
-      )}
 
-      {isGrossProfit && (
-        <div className="mb-5 p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            日期范围（法人=宁波智能, 产品线=全选, 大区=华南, 战区=全选）
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              value={grossProfitStartDate}
-              onChange={(e) => setGrossProfitStartDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-green/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-            <span className="text-[10px] text-text-muted">~</span>
-            <input
-              type="date"
-              value={grossProfitEndDate}
-              onChange={(e) => setGrossProfitEndDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-green/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-          </div>
-        </div>
-      )}
-      {isAdjust && (
-        <div className="mb-5 p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            日期范围（产品线=全选, 营销组织=华南大区, 还原项目=全选）
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              value={adjustStartDate}
-              onChange={(e) => setAdjustStartDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-purple/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-            <span className="text-[10px] text-text-muted">~</span>
-            <input
-              type="date"
-              value={adjustEndDate}
-              onChange={(e) => setAdjustEndDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-purple/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-          </div>
-        </div>
-      )}
 
-      {isCashApp && (
-        <div className="mb-5 p-3 rounded-xl bg-white/[0.02] border border-white/[0.06]" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            时间范围（法人=宁波智能 | 审批中 | 空调 | 华南大区）
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              value={cashStartDate}
-              onChange={(e) => setCashStartDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-green/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-            <span className="text-[10px] text-text-muted">~</span>
-            <input
-              type="date"
-              value={cashEndDate}
-              onChange={(e) => setCashEndDate(e.target.value)}
-              className="flex-1 px-2 py-1.5 rounded-lg text-[11px] bg-white/[0.03] border border-white/[0.08] text-text-primary focus:outline-none focus:border-accent-green/40 transition-colors duration-300 [color-scheme:dark]"
-            />
-          </div>
-        </div>
-      )}
 
       <div className="flex items-center justify-between pt-3.5 border-t border-white/[0.04]">
         <div className="flex items-center gap-3 text-[11px] text-text-muted">
@@ -674,7 +514,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
-            {tool.responseTime}ms
+            约 {tool.responseTime} 分钟
           </span>
           <span className="text-text-muted/40">{tool.version}</span>
         </div>

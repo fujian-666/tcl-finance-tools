@@ -12,7 +12,7 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: 'production',
-        PORT: '3004',
+        PORT: '3005',
         PYTHONUNBUFFERED: '1',
         PATH: 'C:\\Users\\FJ\\AppData\\Local\\Python\\pythoncore-3.14-64;C:\\Users\\FJ\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts;C:\\Users\\FJ\\Trae\\.venv\\Scripts;C:\\Program Files\\nodejs;' + (process.env.PATH || ''),
         PLAYWRIGHT_BROWSERS_PATH: 'C:\\Users\\FJ\\AppData\\Local\\ms-playwright',

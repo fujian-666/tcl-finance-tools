@@ -1,29 +1,11 @@
 import cloudbase from '@cloudbase/node-sdk';
 import fs from 'fs';
 import path from 'path';
-// ???? .env ?????????
-import { readFileSync, existsSync } from 'fs';
-function __loadEnv() {
-  const p = new URL('./.env', import.meta.url).pathname;
-  if (!existsSync(p)) return;
-  for (const line of readFileSync(p, 'utf-8').split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const i = t.indexOf('=');
-    if (i <= 0) continue;
-    const k = t.slice(0, i).trim();
-    let v = t.slice(i + 1).trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    if (k && !(k in process.env)) process.env[k] = v;
-  }
-}
-__loadEnv();
-
 
 const app = cloudbase.init({
-  env: process.env.COS_ENV || 'cloud1-db-d5g1771j0b91888c7',
-  secretId: process.env.COS_SECRET_ID || '',
-  secretKey: process.env.COS_SECRET_KEY || ''
+  env: 'cloud1-db-d5g1771j0b91888c7',
+  secretId: '***REDACTED***',
+  secretKey: '***REDACTED***'
 });
 const db = app.database();
 const desktop = 'C:/Users/FJ/Desktop';

@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { tools, platformStats, type Category } from '../data/tools';
 import SearchBar from '../components/SearchBar';
 import CategoryFilter from '../components/CategoryFilter';
@@ -8,6 +9,17 @@ import HeatDashboard from '../components/HeatDashboard';
 export default function Home() {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState<Category>('全部');
+  const [callCounts, setCallCounts] = useState<Record<string, number>>({});
+
+  // 实时拉取各工具调用次数（替代静态 totalCalls）
+  useEffect(() => {
+    apiFetch('/api/tools/call-counts')
+      .then(r => r.json())
+      .then(d => { if (d && typeof d === 'object') setCallCounts(d); })
+      .catch(() => {});
+  }, []);
+
+  const realTotalCalls = Object.values(callCounts).reduce((a, b) => a + (Number(b) || 0), 0);
 
   const filteredTools = useMemo(() => {
     return tools.filter((tool) => {
@@ -34,7 +46,7 @@ export default function Home() {
           </span>
           <span className="w-px h-3 bg-white/[0.06]" />
           <span className="flex items-center gap-1.5">
-            总调用 <span className="text-text-primary font-semibold">{platformStats.totalCalls}</span> 次
+            总调用 <span className="text-text-primary font-semibold">{realTotalCalls > 0 ? realTotalCalls : platformStats.totalCalls}</span> 次
           </span>
           <span className="w-px h-3 bg-white/[0.06]" />
           <span className="flex items-center gap-1.5">
@@ -125,7 +137,7 @@ export default function Home() {
         </div>
       )}
 
-      <HeatDashboard />
+      <HeatDashboard callCounts={callCounts} />
     </div>
   );
 }

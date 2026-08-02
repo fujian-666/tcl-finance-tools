@@ -2,32 +2,14 @@ import cloudbase from '@cloudbase/node-sdk';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
-// ???? .env ?????????
-import { readFileSync, existsSync } from 'fs';
-function __loadEnv() {
-  const p = new URL('./.env', import.meta.url).pathname;
-  if (!existsSync(p)) return;
-  for (const line of readFileSync(p, 'utf-8').split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const i = t.indexOf('=');
-    if (i <= 0) continue;
-    const k = t.slice(0, i).trim();
-    let v = t.slice(i + 1).trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    if (k && !(k in process.env)) process.env[k] = v;
-  }
-}
-__loadEnv();
-
 
 const FONT_PATH = 'C:/Windows/Fonts/simhei.ttf';
 const FONT_BOLD = 'C:/Windows/Fonts/simhei.ttf';
 
 const app = cloudbase.init({
-  env: process.env.COS_ENV || 'cloud1-db-d5g1771j0b91888c7',
-  secretId: process.env.COS_SECRET_ID || '',
-  secretKey: process.env.COS_SECRET_KEY || ''
+  env: 'cloud1-db-d5g1771j0b91888c7',
+  secretId: '***REDACTED***',
+  secretKey: '***REDACTED***'
 });
 const db = app.database();
 const desktop = 'C:/Users/FJ/Desktop';
@@ -96,20 +78,6 @@ function drawTable(doc, headers, rows, colWidths, startY) {
   return y;
 }
 
-// 分页获取集合全部记录（cloudbase 单次 get 默认最多 100 条）
-async function fetchAllRecords(collectionName, maxLimit = 100) {
-  let all = []
-  let offset = 0
-  for (;;) {
-    const res = await db.collection(collectionName).skip(offset).limit(maxLimit).get()
-    const batch = (res.data || []).map(r => r.data || r)
-    all = all.concat(batch)
-    if (batch.length < maxLimit) break
-    offset += maxLimit
-  }
-  return all
-}
-
 async function generatePDF(collectionName, reportTitle, subtitle, headers, rows, filename, collectionLabel) {
   const doc = new PDFDocument({ margin: 40, size: 'A4' });
   doc.registerFont('CN', FONT_PATH);
@@ -158,7 +126,7 @@ async function generatePDF(collectionName, reportTitle, subtitle, headers, rows,
   const footerY = doc.page.height - 50;
   doc.moveTo(margin, footerY).lineTo(pageW - margin, footerY).stroke('#cccccc');
   doc.fontSize(8).font('CN').fill('#999999');
-  doc.text('华南大区运营资产盘点数据管理后台', margin, footerY + 10, { align: 'left' });
+  doc.text('华南大区平台样机盘点数据管理后台', margin, footerY + 10, { align: 'left' });
   doc.text(`第 1 页`, margin, footerY + 10, { align: 'right' });
 
   doc.end();
@@ -170,29 +138,30 @@ async function generatePDF(collectionName, reportTitle, subtitle, headers, rows,
 
 console.log('=== 生成盘点报告PDF ===\n');
 
-// 固定资产（列与 server.js /api/inventory/export?format=pdf 完全一致）
-const fixedData = await fetchAllRecords('fixed_asset_records');
-const fixedHeaders = ['序号', '资产代码', '资产名称', '资产分类', '型号', '购置价值', '净值', '战区', '盘点数量', '实盘数量', '资产状态', '备注'];
+// 固定资产
+const fixedResult = await db.collection('fixed_asset_records').get();
+const fixedData = fixedResult.data.map(r => r.data || r);
+const fixedHeaders = ['序号', '资产代码', '资产名称', '型号', '数量', '资产分类', '战区', '盘点人', '盘点数量', '实盘数量', '资产状态', '使用部门', '使用人', '使用地点'];
 const fixedRows = fixedData.map((row, i) => [
-  i + 1, row['资产代码'] || '', row['资产名称'] || '', row['资产分类描述'] || row['资产分类'] || '',
-  row['型号'] || '', row['购置价值'] != null ? String(row['购置价值']) : '',
-  row['净值'] != null ? String(row['净值']) : '', row['战区'] || '',
-  String(parseInt(row['盘点数量']) || 0), String(parseInt(row['实盘数量']) || 0),
-  row['资产状态'] || '', row['备注'] || ''
+  i + 1, row['资产代码'] || '', row['资产名称'] || '', row['型号'] || '', row['数量'] || '',
+  row['资产分类'] || '', row['战区'] || '', row['盘点人'] || '',
+  row['盘点数量'] || '', row['实盘数量'] || '', row['资产状态'] || '',
+  row['使用部门'] || '', row['使用人'] || '', row['使用地点'] || ''
 ]);
-await generatePDF('fixed_asset_records', '固定资产盘点报告', '华南大区 · 运营资产盘点', fixedHeaders, fixedRows, '固定资产盘点报告.pdf', '固定资产');
+await generatePDF('fixed_asset_records', '固定资产盘点报告', '华南大区 · 平台样机盘点', fixedHeaders, fixedRows, '固定资产盘点报告.pdf', '固定资产');
 console.log('✅ 固定资产盘点报告.pdf');
 
-// 样机盘点（列与 server.js /api/inventory/export?format=pdf 完全一致）
-const invData = await fetchAllRecords('inventory_records');
-const invHeaders = ['序号', '大区', '战区', '仓库名称', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
-const invRows = invData.map((row, i) => [
-  i + 1, row['大区'] || '', row['战区'] || '', row['仓库名称'] || '',
-  row['品类'] || row['产品线'] || '', row['产品型号'] || '',
-  String(parseInt(row['库存']) || 0), String(parseInt(row['实盘数']) || 0),
-  row['机身码'] || '', row['备注'] || '', row['盘点人'] || ''
+// 样机盘点
+const invResult = await db.collection('inventory_records').get();
+const invData = invResult.data.map(r => r.data || r);
+const invHeaders = ['大区', '战区', '仓库名称', '品类', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
+const invRows = invData.map(row => [
+  row['大区'] || '', row['战区'] || '', row['仓库名称'] || '',
+  row['品类'] || '', row['产品型号'] || '',
+  row['库存'] || '', row['实盘数'] || '', row['机身码'] || '',
+  row['备注'] || '', row['盘点人'] || ''
 ]);
-await generatePDF('inventory_records', '样机盘点报告', '华南大区 · 运营资产盘点', invHeaders, invRows, '样机盘点报告.pdf', '样机盘点');
+await generatePDF('inventory_records', '样机盘点报告', '华南大区 · 平台样机盘点', invHeaders, invRows, '样机盘点报告.pdf', '样机盘点');
 console.log('✅ 样机盘点报告.pdf');
 
 console.log('\n✅ PDF报告已生成到桌面');
