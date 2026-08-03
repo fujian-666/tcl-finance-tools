@@ -1393,7 +1393,7 @@ app.get('/api/inventory/export', async (req, res) => {
       doc.moveTo(m, doc.y + 8).lineTo(pageW - m, doc.y + 8).stroke('#cccccc');
 
       // 查询签名数据（含签名图片）
-      let checkerName = '', confirmerName = '', certId = '';
+      let checkerName = '', confirmerName = '', certId = '', notice = null;
       let checkerB64 = '', confirmerB64 = '';
       try {
         const sigRecords = await dbList(collectionName, { recordType: 'signature' });
@@ -1405,6 +1405,8 @@ app.get('/api/inventory/export', async (req, res) => {
           confirmerB64 = r['确认人签名base64'] || r['confirmerB64'] || '';
           const cd = r['数字证书'] || null;
           if (cd && cd.certId) certId = cd.certId;
+          // 知情同意告知书签署信息（法务存证，仅确认人签署时存在）
+          notice = (cd && cd.notice && cd.notice.agreed) ? cd.notice : null;
         }
       } catch (_) {}
 
@@ -1499,9 +1501,16 @@ app.get('/api/inventory/export', async (req, res) => {
       }
       const hasImg = checkerB64 || confirmerB64;
       if (certId) { doc.fontSize(7).fill('#555555'); doc.text(`签名存证哈希：${certId}`, m, sigY + (hasImg ? sigImgH + 26 : 22)); }
+      // 知情同意告知书签署说明（法务存证，随报告归档）
+      if (notice) {
+        const noticeY = sigY + (hasImg ? sigImgH + 26 : 22) + (certId ? 14 : 0);
+        const agreedAt = String(notice.agreedAt || '').replace('T', ' ').replace(/\.\d+Z$/, ' (UTC)');
+        doc.fontSize(7).fill('#555555');
+        doc.text(`确认人${confirmerName || ''}已阅读并签署《样机盘点知情同意告知书》（v${notice.version || '1.0'}），同意时间：${agreedAt}`, m, noticeY, { width: pageW - m * 2 });
+      }
 
       // 法律声明
-      const ft = sigY + (hasImg ? sigImgH + 28 : 12) + (certId ? 34 : 0);
+      const ft = sigY + (hasImg ? sigImgH + 28 : 12) + (certId ? 34 : 0) + (notice ? 14 : 0);
       if (ft < doc.page.height - 40) {
         doc.moveTo(m, ft).lineTo(pageW - m, ft).stroke('#e0e0e0');
         doc.fontSize(6).fill('#CC0000');
