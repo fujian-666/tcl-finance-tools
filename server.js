@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { spawn, execFile } from 'child_process';
 import { execSync } from 'child_process';
 import { promisify } from 'util';
@@ -126,6 +127,14 @@ PYTHON_CMD = resolvePython();
 console.log(`[Backend] Final Python command: ${PYTHON_CMD}`);
 
 app.use(cors({ exposedHeaders: ['Content-Disposition'] }));
+// 压缩前端构建产物（JS/CSS 体积可降 60%~70%）。
+// SSE 必须排除：压缩中间件会缓冲输出，事件就无法实时推送了。
+app.use(compression({
+  filter: (req, res) => {
+    if (String(res.getHeader('Content-Type') || '').includes('text/event-stream')) return false;
+    return compression.filter(req, res);
+  },
+}));
 app.use(express.json());
 
 // ==================== 全局鉴权（默认拒绝）====================
@@ -2051,6 +2060,33 @@ app.post('/api/access/password', async (req, res) => {
     return res.status(500).json({ ok: false, error: '修改失败：' + (err.message || '未知错误') });
   }
 });
+
+// ==================== 前端静态托管（生产）====================
+// 构建产物由 Express 直接托管：不再为了托管一个 dist 目录常驻 Vite dev server
+// （dev server 只用于本地热更新，生产多一个 500M 内存的 PM2 进程且响应更慢）。
+const distDir = path.join(__dirname, 'dist');
+const distIndex = path.join(distDir, 'index.html');
+if (fs.existsSync(distIndex)) {
+  app.use(express.static(distDir, {
+    index: false,
+    setHeaders: (res, filePath) => {
+      // 带 hash 的静态资源可以长缓存；index.html 必须每次都回源，否则新版本发不出去
+      if (path.basename(filePath) === 'index.html') {
+        res.setHeader('Cache-Control', 'no-cache');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=604800');
+      }
+    },
+  }));
+  // SPA 回退：非 /api 路径都交给前端路由处理
+  app.get(/^\/(?!api\/).*/, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(distIndex);
+  });
+  console.log(`[Backend] 前端静态托管已启用: ${distDir}`);
+} else {
+  console.log('[Backend] 未找到 dist/index.html，仅提供 API（开发请用 npm run dev）');
+}
 
 // 404 处理
 app.use((_req, res) => {
