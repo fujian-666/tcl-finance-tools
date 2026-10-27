@@ -61,3 +61,23 @@ export async function logout(): Promise<void> {
   }
   clearToken();
 }
+
+/**
+ * 带超时的请求，轮询类接口专用。
+ * 没有超时控制时，一个挂起的请求会让定时器不断叠加新请求：
+ * 浏览器同源只有 6 个并发连接，占满后整个平台的接口都会排队——
+ * 用户看到的就是"平台卡了"。
+ */
+export async function apiFetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 8000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await apiFetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}

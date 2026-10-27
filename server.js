@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import { execSync } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
@@ -16,6 +17,10 @@ import { createHash, randomBytes } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// 异步执行子进程：Express 是单线程，execSync 会阻塞整个事件循环
+// （阻塞期间所有轮询/页面请求都收不到响应），性能敏感路径一律用 execFile 异步版本。
+const execFileAsync = promisify(execFile);
 
 // ==================== 环境变量加载（.env / .env.local）====================
 // 凭据只允许来自环境变量文件，禁止硬编码进源码。
@@ -425,31 +430,64 @@ app.get('/api/tools/:id/call-count', (req, res) => {
   res.json({ count: counts[req.params.id] || 0 });
 });
 
-function killExistingProcesses(scriptPath) {
+// ==================== 运行进程台账 ====================
+// 原实现每次点"运行"都用 execSync('tasklist') 扫全机 + 对每个 python.exe 再
+// execSync('wmic') 查命令行：实测全量 CIM 扫描 8.6s、wmic 单次数百毫秒起，
+// 且 Express 单线程下这些同步调用会让整个服务停摆——所有轮询请求一起卡住。
+// 改为"只记录自己拉起的 PID"，进程不存在时零开销，存在时一次 tasklist 校验（约 0.8s 异步）。
+const RUN_PIDS_FILE = path.join(__dirname, '.run-pids.json');
+
+function readRunPids() {
   try {
-    const scriptName = path.basename(scriptPath);
-    const output = execSync('tasklist /FO CSV /NH', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    const lines = output.trim().split('\n');
-    for (const line of lines) {
-      const parts = line.replace(/"/g, '').split(',');
-      if (parts.length >= 2 && parts[0].toLowerCase() === 'python.exe') {
-        const pid = parseInt(parts[1]);
-        if (!isNaN(pid) && pid > 0) {
-          try {
-            const cmdline = execSync(`wmic process where processid=${pid} get commandline /value`, {
-              encoding: 'utf-8',
-              stdio: ['ignore', 'pipe', 'pipe'],
-              windowsHide: true
-            });
-            if (cmdline.includes(scriptName)) {
-              console.log(`[Backend] Killing stale process: ${scriptName} (PID ${pid})`);
-              execSync(`taskkill /F /PID ${pid}`, { windowsHide: true });
-            }
-          } catch (_) {}
-        }
-      }
-    }
-  } catch (_) {}
+    return JSON.parse(fs.readFileSync(RUN_PIDS_FILE, 'utf-8')) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeRunPids(map) {
+  try {
+    fs.writeFileSync(RUN_PIDS_FILE, JSON.stringify(map));
+  } catch (_) { /* 台账写失败不影响运行 */ }
+}
+
+function recordRunPid(id, pid) {
+  const pids = readRunPids();
+  pids[id] = pid;
+  writeRunPids(pids);
+}
+
+function clearRunPid(id) {
+  const pids = readRunPids();
+  if (pids[id] !== undefined) {
+    delete pids[id];
+    writeRunPids(pids);
+  }
+}
+
+async function isPythonPidAlive(pid) {
+  try {
+    const { stdout } = await execFileAsync('tasklist',
+      ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+      { timeout: 5000, windowsHide: true });
+    return String(stdout).toLowerCase().includes('python.exe');
+  } catch (_) {
+    return false;
+  }
+}
+
+async function killExistingProcesses(id, scriptPath) {
+  const pids = readRunPids();
+  const pid = Number(pids[id]);
+  if (!pid) return;
+  if (await isPythonPidAlive(pid)) {
+    try {
+      await execFileAsync('taskkill', ['/F', '/PID', String(pid)],
+        { timeout: 8000, windowsHide: true });
+      console.log(`[Backend] Killing stale process: ${path.basename(scriptPath)} (PID ${pid})`);
+    } catch (_) { /* 进程已退出或无权结束 */ }
+  }
+  clearRunPid(id);
 }
 
 app.post('/api/tools/:id/run', async (req, res) => {
@@ -460,7 +498,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
     return res.status(404).json({ error: '工具不存在' });
   }
 
-  killExistingProcesses(tool.script);
+  await killExistingProcesses(id, tool.script);
 
   if (runningProcesses.has(id)) {
     return res.status(409).json({ error: '工具正在运行中' });
@@ -557,6 +595,9 @@ app.post('/api/tools/:id/run', async (req, res) => {
     },
   });
 
+  // 记录 PID 台账：下次点"运行"只需校验这一个 PID，不再扫全机进程
+  recordRunPid(id, child.pid);
+
   // 初始化日志缓冲区
   processLogs.set(id, []);
 
@@ -572,6 +613,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
     // 标记任务完成的统一函数（关键词检测 / exit / close / keepalive 共用）
     const markCompleted = (exitCode, msg) => {
       if (completedProcesses.has(id)) return;
+      clearRunPid(id);
       clearTimeout(killTimer);
       completedProcesses.set(id, {
         exitCode,
@@ -719,8 +761,11 @@ app.post('/api/tools/:id/run', async (req, res) => {
       if (runningProcesses.has(id)) {
         console.log(`[${tool.name}] 超过 ${KILL_TIMEOUT / 60000} 分钟，强制终止 PID=${child.pid}`);
         if (process.platform === 'win32') {
-          // Windows 上 SIGTERM 无效，用 taskkill
-          try { require('child_process').execSync(`taskkill /F /PID ${child.pid} /T`, { timeout: 10000, windowsHide: true }); } catch (_) {}
+          // Windows 上 SIGTERM 无效，用 taskkill。
+          // 注意：此处必须异步（原来写成 require('child_process').execSync —— ESM 下
+          // require 不存在，会抛 ReferenceError 被空 catch 吞掉，进程实际杀不掉）。
+          execFile('taskkill', ['/F', '/PID', String(child.pid), '/T'],
+            { windowsHide: true }, () => {});
         } else {
           try { child.kill('SIGTERM'); } catch (_) {}
           setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 5000);
@@ -732,6 +777,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
     // 标记任务完成的统一函数
     const markCompleted = (exitCode, msg) => {
       if (completedProcesses.has(id)) return;
+      clearRunPid(id);
       clearTimeout(killTimer);
       completedProcesses.set(id, {
         exitCode,

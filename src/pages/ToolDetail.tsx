@@ -3,7 +3,7 @@ import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { tools } from '../data/tools';
 import StatusBadge from '../components/StatusBadge';
 import { useToast } from '../contexts/ToastContext';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiFetchWithTimeout } from '../lib/api';
 
 const API_BASE = '';
 
@@ -240,12 +240,16 @@ export default function ToolDetail() {
     }, 5 * 60 * 1000);
 
     // 状态轮询（带重试计数和错误处理，一劳永逸）
+    // in-flight 标记：上一轮没回来就跳过本轮，避免请求叠加把浏览器 6 个连接占满
     let pollFailCount = 0;
+    let statusInFlight = false;
+    let logInFlight = false;
     const MAX_POLL_FAILS = 5;
     timerRef.current = setInterval(async () => {
-      if (!tool) return;
+      if (!tool || statusInFlight) return;
+      statusInFlight = true;
       try {
-        const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/status?_t=${Date.now()}`, { cache: 'no-store' });
+        const res = await apiFetchWithTimeout(`${API_BASE}/api/tools/${tool.id}/status?_t=${Date.now()}`, { cache: 'no-store' }, 8000);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         pollFailCount = 0;
@@ -300,13 +304,16 @@ export default function ToolDetail() {
             addToast({ type: 'error', title: tool.name, message: '后端连接失败，请刷新页面后重试', duration: 8000 });
           }
         }
+      } finally {
+        statusInFlight = false;
       }
     }, 2000) as unknown as ReturnType<typeof setTimeout>;
 
     logRef.current = setInterval(async () => {
-      if (!tool) return;
+      if (!tool || logInFlight) return;
+      logInFlight = true;
       try {
-        const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/logs`);
+        const res = await apiFetchWithTimeout(`${API_BASE}/api/tools/${tool.id}/logs`, {}, 8000);
         const data = await res.json();
         if (!mountedRef.current) return;
         if (data.logs && data.logs.length > 0) {
@@ -317,6 +324,8 @@ export default function ToolDetail() {
         }
       } catch (e) {
         console.error('[LogPoll] Fetch error:', e);
+      } finally {
+        logInFlight = false;
       }
     }, 1000);
   };
