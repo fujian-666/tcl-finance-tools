@@ -298,6 +298,85 @@ const completedProcesses = new Map();
 const processLogs = new Map();  // id -> string[] log buffer
 const processResults = new Map();  // id -> object (for OA approval structured results)
 
+// ==================== 运行反馈推送（SSE） ====================
+// 后端是唯一的超时真相：前端从快照/事件读取，不再自己硬编码 5 分钟。
+const RUN_TIMEOUT_MS = 15 * 60 * 1000;
+const COMPLETED_TTL_MS = 60 * 60 * 1000;   // 完成状态保留 1 小时（原 5 分钟太短，前端会误判成功）
+const LOG_TTL_MS = 10 * 60 * 1000;         // 日志保留 10 分钟供回看
+const FINISH_GRACE_MS = 2 * 60 * 1000;     // 输出"任务完成"后等待进程退出的收尾窗口
+
+const streamClients = new Map();  // toolId -> Set<res>
+
+function sseSend(res, event, data) {
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  } catch (_) { /* 客户端已断开，由 close 回调清理 */ }
+}
+
+function broadcastTool(id, event, data) {
+  const clients = streamClients.get(id);
+  if (!clients) return;
+  for (const res of clients) sseSend(res, event, data);
+}
+
+function updateRunningMessage(id, message) {
+  const running = runningProcesses.get(id);
+  if (!running) return;
+  running.message = message;
+  broadcastTool(id, 'status', {
+    running: true,
+    startTime: running.startTime,
+    message,
+    timeoutMs: RUN_TIMEOUT_MS,
+  });
+}
+
+function toolStatusSnapshot(id) {
+  const running = runningProcesses.get(id);
+  const completed = completedProcesses.get(id);
+  return {
+    running: !!running,
+    startTime: running ? running.startTime : null,
+    message: running ? (running.message || '运行中...') : (completed ? completed.message : null),
+    // 有记录才有 exitCode；无记录时前端应显示"状态未知"而不是当成成功
+    exitCode: running ? undefined : (completed ? completed.exitCode : undefined),
+    timeoutMs: RUN_TIMEOUT_MS,
+    logs: processLogs.get(id) || [],
+  };
+}
+
+// SSE 推送：一次连接拿到快照，之后日志/状态实时推送，前端不再轮询。
+// Content-Type 必须是 text/event-stream，且禁止中间层缓冲（X-Accel-Buffering）。
+app.get('/api/tools/:id/stream', (req, res) => {
+  const { id } = req.params;
+  if (!toolScripts[id]) {
+    return res.status(404).json({ error: '工具不存在' });
+  }
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write('retry: 3000\n\n');
+  sseSend(res, 'snapshot', toolStatusSnapshot(id));
+
+  const clients = streamClients.get(id) || new Set();
+  clients.add(res);
+  streamClients.set(id, clients);
+
+  // 心跳：避免代理/防火墙把空闲连接掐断（15s 一次远低于常见 60s 空闲超时）
+  const ping = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) { /* 等待 close 清理 */ }
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    clients.delete(res);
+    if (clients.size === 0) streamClients.delete(id);
+  });
+});
+
 // 持久化运行次数
 const callCountPath = path.join(__dirname, 'call_counts.json');
 function loadCallCounts() {
@@ -600,42 +679,60 @@ app.post('/api/tools/:id/run', async (req, res) => {
 
   // 初始化日志缓冲区
   processLogs.set(id, []);
+  // 新一轮运行开始：清掉上一次的完成记录，否则 markCompleted 会因"已完成"直接返回，
+  // 本次运行永远不会被标记完成
+  completedProcesses.delete(id);
 
-  // 在函数作用域声明，供两个 markCompleted 闭包共用
-  let killTimer, keepaliveRef;
+  // 在函数作用域声明：所有完成路径（关键词失败 / exit / close / 超时 / 启动失败）共用一个 markCompleted
+  let killTimer = null, keepaliveRef = null, graceTimer = null;
+  let sawFinishHint = false;
+
+  // 唯一完成入口：只有进程真正结束才写 completedProcesses。
+  // 原来关键词先到就标记完成，但进程还在写文件/发飞书——前端已显示"运行完成"，
+  // 用户点开导出文件是残缺的。现在关键词只作收尾提示，终态只认 exit。
+  const markCompleted = (exitCode, msg) => {
+    if (completedProcesses.has(id)) return;
+    clearRunPid(id);
+    clearTimeout(killTimer); killTimer = null;
+    clearTimeout(graceTimer); graceTimer = null;
+    if (keepaliveRef) { clearInterval(keepaliveRef); keepaliveRef = null; }
+    const message = msg || (exitCode === 0 ? '运行完成' : `异常退出 (code ${exitCode})`);
+    const endTime = new Date().toISOString();
+    completedProcesses.set(id, { exitCode, endTime, message, timeoutMs: RUN_TIMEOUT_MS });
+    runningProcesses.delete(id);
+    console.log(`[${tool.name}] 标记完成: exitCode=${exitCode}, message=${message}`);
+    broadcastTool(id, 'status', { running: false, exitCode, message, endTime, timeoutMs: RUN_TIMEOUT_MS });
+    // 完成状态保留 1 小时、日志保留 10 分钟（原来都是 5 分钟，
+    // 超时后前端拿不到 exitCode，会走"视为成功"分支造成假成功）
+    setTimeout(() => completedProcesses.delete(id), COMPLETED_TTL_MS);
+    setTimeout(() => { processLogs.delete(id); processResults.delete(id); }, LOG_TTL_MS);
+  };
 
   if (!isMonitor) {
     const toolName = tool.name;
-    // 完成关键词 — 当 Python 脚本打印这些词时，立即标记为完成
-    const COMPLETE_KEYWORDS = ['任务完成', '导出失败，任务终止', '任务完成: 导出并发送成功'];
+    // 完成标识只作"收尾提示"；真正的完成只认进程 exit
+    const COMPLETE_KEYWORDS = ['任务完成', '任务完成: 导出并发送成功'];
     const FAIL_KEYWORDS = ['导出失败，任务终止', '发送失败'];
 
-    // 标记任务完成的统一函数（关键词检测 / exit / close / keepalive 共用）
-    const markCompleted = (exitCode, msg) => {
-      if (completedProcesses.has(id)) return;
-      clearRunPid(id);
-      clearTimeout(killTimer);
-      completedProcesses.set(id, {
-        exitCode,
-        endTime: new Date().toISOString(),
-        message: msg || (exitCode === 0 ? '运行完成' : `异常退出 (code ${exitCode})`),
-      });
-      runningProcesses.delete(id);
-      if (keepaliveRef) { clearInterval(keepaliveRef); keepaliveRef = null; }
-      console.log(`[${toolName}] 标记完成: exitCode=${exitCode}, message=${msg}`);
-      setTimeout(() => {
-        completedProcesses.delete(id);
-        processLogs.delete(id);
-        processResults.delete(id);
-      }, 5 * 60 * 1000);
-    };
-
-    const checkCompletionKeywords = (line) => {
-      const isComplete = COMPLETE_KEYWORDS.some(k => line.includes(k));
-      const isFail = FAIL_KEYWORDS.some(k => line.includes(k));
-      if (isComplete || isFail) {
-        console.log(`[${toolName}] 检测到完成关键词: "${line.trim()}" → ${isFail ? '失败' : '成功'}`);
-        markCompleted(isFail ? 1 : 0, isFail ? '运行失败' : '运行完成');
+    const checkFinishHint = (line) => {
+      if (FAIL_KEYWORDS.some(k => line.includes(k))) {
+        // 脚本自己宣告失败，属可信终态，立即收敛
+        console.log(`[${toolName}] 检测到失败关键词: "${line.trim()}"`);
+        markCompleted(1, '运行失败');
+        return;
+      }
+      if (!sawFinishHint && COMPLETE_KEYWORDS.some(k => line.includes(k))) {
+        sawFinishHint = true;
+        console.log(`[${toolName}] 检测到完成标识: "${line.trim()}"（等待进程退出）`);
+        updateRunningMessage(id, '脚本已输出完成标识，等待进程退出…');
+        // 收尾兜底：若输出完成后 2 分钟仍未退出，视为卡在收尾，强杀并按完成处理
+        graceTimer = setTimeout(() => {
+          if (!runningProcesses.has(id)) return;
+          console.warn(`[${toolName}] 已输出完成标识但进程未退出，强制结束 PID=${child.pid}`);
+          execFile('taskkill', ['/F', '/PID', String(child.pid), '/T'],
+            { windowsHide: true }, () => {});
+          markCompleted(0, '运行完成（收尾超时已终止）');
+        }, FINISH_GRACE_MS);
       }
     };
 
@@ -648,7 +745,8 @@ app.post('/api/tools/:id/run', async (req, res) => {
     rl.on('line', (line) => {
       console.log(`[${toolName}] ${line}`);
       if (processLogs.has(id)) processLogs.get(id).push(line);
-      checkCompletionKeywords(line);
+      broadcastTool(id, 'log', { line });
+      checkFinishHint(line);
 
       // OA审批：捕获结构化结果JSON
       if (isOA) {
@@ -678,7 +776,8 @@ app.post('/api/tools/:id/run', async (req, res) => {
       rlErr.on('line', (line) => {
         console.error(`[${toolName}] ${line}`);
         if (processLogs.has(id)) processLogs.get(id).push(line);
-        checkCompletionKeywords(line);
+        broadcastTool(id, 'log', { line });
+        checkFinishHint(line);
       });
     }
   }
@@ -686,6 +785,13 @@ app.post('/api/tools/:id/run', async (req, res) => {
   runningProcesses.set(id, {
     process: child,
     startTime: new Date().toISOString(),
+    message: '运行中...',
+  });
+  broadcastTool(id, 'status', {
+    running: true,
+    startTime: runningProcesses.get(id).startTime,
+    message: '运行中...',
+    timeoutMs: RUN_TIMEOUT_MS,
   });
 
   if (isInvoiceOcr) {
@@ -756,10 +862,9 @@ app.post('/api/tools/:id/run', async (req, res) => {
   } else if (!isInvoiceOcr) {
     // stdout/stderr 已由 readline 按行处理（见上方 if (!isMonitor) 块），此处不再重复监听
 
-    const KILL_TIMEOUT = 15 * 60 * 1000;
     killTimer = setTimeout(() => {
       if (runningProcesses.has(id)) {
-        console.log(`[${tool.name}] 超过 ${KILL_TIMEOUT / 60000} 分钟，强制终止 PID=${child.pid}`);
+        console.log(`[${tool.name}] 超过 ${RUN_TIMEOUT_MS / 60000} 分钟，强制终止 PID=${child.pid}`);
         if (process.platform === 'win32') {
           // Windows 上 SIGTERM 无效，用 taskkill。
           // 注意：此处必须异步（原来写成 require('child_process').execSync —— ESM 下
@@ -772,27 +877,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
         }
         markCompleted(-1, '运行超时自动终止');
       }
-    }, KILL_TIMEOUT);
-
-    // 标记任务完成的统一函数
-    const markCompleted = (exitCode, msg) => {
-      if (completedProcesses.has(id)) return;
-      clearRunPid(id);
-      clearTimeout(killTimer);
-      completedProcesses.set(id, {
-        exitCode,
-        endTime: new Date().toISOString(),
-        message: msg || (exitCode === 0 ? '运行完成' : `异常退出 (code ${exitCode})`),
-      });
-      runningProcesses.delete(id);
-      if (keepaliveRef) { clearInterval(keepaliveRef); keepaliveRef = null; }
-      console.log(`[${tool.name}] 标记完成: exitCode=${exitCode}, message=${msg}`);
-      setTimeout(() => {
-        completedProcesses.delete(id);
-        processLogs.delete(id);
-        processResults.delete(id);
-      }, 5 * 60 * 1000);
-    };
+    }, RUN_TIMEOUT_MS);
 
     // exit 事件 — 进程退出时立即触发，不依赖 stdout 流状态
     child.on('exit', (code, signal) => {
@@ -822,15 +907,18 @@ app.post('/api/tools/:id/run', async (req, res) => {
 
   child.on('error', (err) => {
     console.error(`[${tool.name}] Spawn error:`, err.message);
-    completedProcesses.set(id, {
-      exitCode: -1,
-      endTime: new Date().toISOString(),
-      message: `启动失败: ${err.message}`,
-    });
-    setTimeout(() => completedProcesses.delete(id), 5 * 60 * 1000);
-    runningProcesses.delete(id);
     if (isMonitor) {
       monitorData.status = 'error';
+      runningProcesses.delete(id);
+      completedProcesses.set(id, {
+        exitCode: -1,
+        endTime: new Date().toISOString(),
+        message: `启动失败: ${err.message}`,
+        timeoutMs: RUN_TIMEOUT_MS,
+      });
+      setTimeout(() => completedProcesses.delete(id), COMPLETED_TTL_MS);
+    } else {
+      markCompleted(-1, `启动失败: ${err.message}`);
     }
   });
 
@@ -854,29 +942,9 @@ app.post('/api/tools/:id/run', async (req, res) => {
 
 app.get('/api/tools/:id/status', (req, res) => {
   const { id } = req.params;
-  const running = runningProcesses.get(id);
-  console.log(`[STATUS] ${id} polled: running=${!!running}, completed=${completedProcesses.has(id)}`);
-
-  if (running) {
-    res.json({
-      running: true,
-      startTime: running.startTime,
-      message: running.message || null,
-    });
-  } else {
-    // 检查是否有已结束的进程信息（通过 exitCode 缓存）
-    const completed = completedProcesses.get(id);
-    if (completed) {
-      res.json({
-        running: false,
-        exitCode: completed.exitCode,
-        message: completed.message,
-        endTime: completed.endTime,
-      });
-    } else {
-      res.json({ running: false });
-    }
-  }
+  // 不再每次轮询打一行日志（原来每 2 秒一条，PM2 日志无限增长）
+  const { logs: _logs, ...snapshot } = toolStatusSnapshot(id);
+  res.json(snapshot);
 });
 
 app.post('/api/tools/:id/stop', async (req, res) => {
@@ -887,16 +955,21 @@ app.post('/api/tools/:id/stop', async (req, res) => {
     return res.status(404).json({ error: '工具未在运行' });
   }
 
+  // 异步杀进程：execSync 会阻塞整个服务（与运行前清理同一个根因）
   try {
-    execSync(`taskkill /F /PID ${running.process.pid}`, { windowsHide: true });
-  } catch {
+    await execFileAsync('taskkill', ['/F', '/PID', String(running.process.pid), '/T'],
+      { timeout: 8000, windowsHide: true });
+  } catch (_) {
     try { running.process.kill('SIGTERM'); } catch {}
-    setTimeout(() => {
-      try { running.process.kill('SIGKILL'); } catch {}
-    }, 2000);
   }
 
   runningProcesses.delete(id);
+  clearRunPid(id);
+  const endTime = new Date().toISOString();
+  const stopMsg = '手动停止';
+  completedProcesses.set(id, { exitCode: -1, endTime, message: stopMsg, timeoutMs: RUN_TIMEOUT_MS });
+  broadcastTool(id, 'status', { running: false, exitCode: -1, message: stopMsg, endTime, timeoutMs: RUN_TIMEOUT_MS });
+  setTimeout(() => completedProcesses.delete(id), COMPLETED_TTL_MS);
   console.log(`[Backend] Stopped process: ${id}`);
   res.json({ success: true, message: '已停止' });
 });
