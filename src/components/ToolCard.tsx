@@ -90,32 +90,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
   const isMonitor = tool.id === 'deepseek-monitor';
   const isInvoiceOcr = tool.id === 'invoice-ocr';
 
-  // 检查工具初始状态
-  useEffect(() => {
-    checkInitialStatus();
-    fetchCallCount();
-    return () => {
-      mountedRef.current = false;
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      if (logRef.current) {
-        clearInterval(logRef.current);
-        logRef.current = null;
-      }
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
-      }
-      if (clearResultRef.current) {
-        clearTimeout(clearResultRef.current);
-        clearResultRef.current = null;
-      }
-    };
-  }, []);
-
-  const fetchCallCount = async () => {
+  const fetchCallCount = useCallback(async () => {
     try {
       const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/call-count`);
       const data = await res.json();
@@ -125,46 +100,9 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
     } catch {
       // 后端不可用
     }
-  };
+  }, [tool.id]);
 
-  const checkInitialStatus = async () => {
-    try {
-      const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/status`);
-      const data = await res.json();
-      if (data.running && mountedRef.current) {
-        setRunning(true);
-        setMessage(data.message || '运行中...');
-        startStatusPolling();
-      } else if (data.exitCode !== undefined && mountedRef.current) {
-        // 有完成记录，显示结果
-        if (data.exitCode === 0) {
-          setResultType('success');
-          setMessage(data.message || '已完成');
-        } else {
-          setResultType('error');
-          setMessage(data.message || '失败');
-        }
-        setRunning(false);
-        setTimeout(() => {
-          if (mountedRef.current) { setResultType(null); setMessage(''); }
-        }, 5000);
-      } else if (mountedRef.current) {
-        // 后端无运行中进程也无历史记录 → 确保前端显示 idle
-        setRunning(false);
-        setResultType(null);
-        setMessage('');
-      }
-    } catch {
-      // 后端不可用 → 也重置为 idle，避免永远显示"运行中"
-      if (mountedRef.current) {
-        setRunning(false);
-        setResultType(null);
-        setMessage('');
-      }
-    }
-  };
-
-  const startStatusPolling = () => {
+  const startStatusPolling = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     if (logRef.current) clearInterval(logRef.current);
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -265,24 +203,94 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
         console.error('[LogPoll] Fetch error:', e);
       }
     }, 1000);
-  };
+  }, [tool.id, tool.name, addToast, fetchCallCount]);
 
-  const fetchMonitorData = useCallback(async () => {
+  const checkInitialStatus = useCallback(async () => {
     try {
-      const res = await apiFetch(`${API_BASE}/api/tools/deepseek-monitor/data`);
+      const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/status`);
       const data = await res.json();
-      if (mountedRef.current) setMonitor(data);
+      if (data.running && mountedRef.current) {
+        setRunning(true);
+        setMessage(data.message || '运行中...');
+        startStatusPolling();
+      } else if (data.exitCode !== undefined && mountedRef.current) {
+        // 有完成记录，显示结果
+        if (data.exitCode === 0) {
+          setResultType('success');
+          setMessage(data.message || '已完成');
+        } else {
+          setResultType('error');
+          setMessage(data.message || '失败');
+        }
+        setRunning(false);
+        setTimeout(() => {
+          if (mountedRef.current) { setResultType(null); setMessage(''); }
+        }, 5000);
+      } else if (mountedRef.current) {
+        // 后端无运行中进程也无历史记录 → 确保前端显示 idle
+        setRunning(false);
+        setResultType(null);
+        setMessage('');
+      }
     } catch {
-      // backend not available
+      // 后端不可用 → 也重置为 idle，避免永远显示"运行中"
+      if (mountedRef.current) {
+        setRunning(false);
+        setResultType(null);
+        setMessage('');
+      }
     }
-  }, []);
+  }, [tool.id, startStatusPolling]);
+
+  // 检查工具初始状态
+  useEffect(() => {
+    // 延迟到 effect 提交后异步执行，避免在 effect 体内同步 setState
+    const timer = setTimeout(() => {
+      checkInitialStatus();
+      fetchCallCount();
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      mountedRef.current = false;
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      if (logRef.current) {
+        clearInterval(logRef.current);
+        logRef.current = null;
+      }
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      if (clearResultRef.current) {
+        clearTimeout(clearResultRef.current);
+        clearResultRef.current = null;
+      }
+    };
+  }, [checkInitialStatus, fetchCallCount]);
 
   useEffect(() => {
-    if (isMonitor) {
-      fetchMonitorData();
-      const interval = setInterval(fetchMonitorData, 5000);
-      return () => clearInterval(interval);
-    }
+    if (!isMonitor) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const res = await apiFetch(`${API_BASE}/api/tools/deepseek-monitor/data`);
+        const data = await res.json();
+        if (active) setMonitor(data);
+      } catch {
+        // backend not available
+      }
+    };
+    // 首次拉取与定时刷新均走异步路径，避免在 effect 体内同步 setState
+    const timer = setTimeout(load, 0);
+    const interval = setInterval(load, 5000);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
   }, [isMonitor]);
 
   useEffect(() => {
@@ -295,6 +303,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
   }, [isInvoiceOcr]);
 
   const isOA = tool.id === 'oa-approval';
+  const isAccessPassword = tool.id === 'access-password';
 
   const handleRun = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -302,6 +311,12 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
 
     // OA审批助手：跳转到详情页输入URL
     if (isOA) {
+      navigate(`/tool/${tool.id}`);
+      return;
+    }
+
+    // 修改访问密码：直接进入系统设置页（非运行类工具）
+    if (isAccessPassword) {
       navigate(`/tool/${tool.id}`);
       return;
     }

@@ -1,3 +1,4 @@
+import { loadEnv, requireEnv } from './load-env.mjs';
 import cloudbase from '@cloudbase/node-sdk';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
@@ -6,10 +7,12 @@ import path from 'path';
 const FONT_PATH = 'C:/Windows/Fonts/simhei.ttf';
 const FONT_BOLD = 'C:/Windows/Fonts/simhei.ttf';
 
+loadEnv();
+
 const app = cloudbase.init({
-  env: 'cloud1-db-d5g1771j0b91888c7',
-  secretId: '***REDACTED***',
-  secretKey: '***REDACTED***'
+  env: process.env.COS_ENV,
+  secretId: requireEnv('COS_SECRET_ID'),
+  secretKey: requireEnv('COS_SECRET_KEY')
 });
 const db = app.database();
 const desktop = 'C:/Users/FJ/Desktop';

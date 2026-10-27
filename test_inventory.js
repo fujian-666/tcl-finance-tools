@@ -1,10 +1,13 @@
+import { loadEnv, requireEnv } from './load-env.mjs';
 import cloudbase from '@cloudbase/node-sdk';
 import fs from 'fs';
 
+loadEnv();
+
 const app = cloudbase.init({
-  env: 'cloud1-db-d5g1771j0b91888c7',
-  secretId: '***REDACTED***',
-  secretKey: '***REDACTED***'
+  env: process.env.COS_ENV,
+  secretId: requireEnv('COS_SECRET_ID'),
+  secretKey: requireEnv('COS_SECRET_KEY')
 });
 const db = app.database();
 

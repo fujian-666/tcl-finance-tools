@@ -53,12 +53,12 @@ goto :eof
 echo ============================================
 echo  TCL Finance Tools - Service Status
 echo ============================================
-netstat -ano | findstr ":3004" >nul
+netstat -ano | findstr ":3005" >nul
 if errorlevel 1 (
-    echo [OFF] Backend port 3004 - NOT RUNNING
+    echo [OFF] Backend port 3005 - NOT RUNNING
 ) else (
-    echo [ON]  Backend port 3004 - RUNNING
-    for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3004.*LISTENING"') do echo       PID: %%a
+    echo [ON]  Backend port 3005 - RUNNING
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3005.*LISTENING"') do echo       PID: %%a
 )
 netstat -ano | findstr ":8888" >nul
 if errorlevel 1 (
@@ -69,6 +69,6 @@ if errorlevel 1 (
 )
 echo.
 echo Frontend URL: http://localhost:8888
-echo Backend URL:  http://localhost:3004
+echo Backend URL:  http://localhost:3005
 echo ============================================
 goto :eof

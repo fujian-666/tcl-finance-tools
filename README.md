@@ -19,7 +19,7 @@ npm install
 #    复制 .env.example 为 .env 并填入真实密钥
 copy .env.example .env
 
-# 3. 启动（后端 3004 + 前端 8888）
+# 3. 启动（后端 3005 + 前端 8888）
 npm run dev        # 仅前端（Vite）
 npm run server     # 仅后端
 npm start          # 前后端同时启动
@@ -31,9 +31,8 @@ npm start          # 前后端同时启动
 
 | 变量 | 说明 |
 |---|---|
-| `PORT` | 后端监听端口（默认 3004） |
-| `ADMIN_AUTH_TOKEN` | 后端 API 鉴权令牌（所有 `/api` 接口需要 `x-auth-token` 请求头） |
-| `VITE_ADMIN_AUTH_TOKEN` | 前端构建/开发时读取的同一令牌（Vite 环境变量） |
+| `PORT` | 后端监听端口（默认 3005） |
+| `ADMIN_PASSWORD` | 管理后台登录密码（`POST /api/auth/login` 校验后签发会话令牌，所有 `/api` 接口需携带 `x-auth-token` 请求头） |
 | `DEEPSEEK_API_KEY` | DeepSeek 大模型 API Key（OA 审批助手使用） |
 | `WX_APPID` / `WX_SECRET` | 微信小程序 AppID / AppSecret（云开发 TCB 数据访问） |
 | `TCB_ENV` | 微信云开发环境 ID |
@@ -69,4 +68,4 @@ npm start          # 前后端同时启动
 | GET | `/api/inventory/photos` | 盘点照片列表 |
 | GET | `/api/inventory/photo/download` | 下载盘点照片 |
 
-除 `/api/health` 外，所有接口需携带请求头 `x-auth-token: <ADMIN_AUTH_TOKEN>`。
+除 `/api/health` 与 `/api/auth/*` 外，所有接口需携带请求头 `x-auth-token: <会话令牌>`。令牌通过 `POST /api/auth/login`（body: `{"password": "<ADMIN_PASSWORD>"}`）获取，12 小时有效；连续失败 5 次将锁定 15 分钟。

@@ -28,7 +28,7 @@ Write-Host "Installing service $serviceName..."
 Write-Host "Configuring service..."
 & $nssmPath set $serviceName AppDirectory $appDir
 & $nssmPath set $serviceName Start SERVICE_AUTO_START
-& $nssmPath set $serviceName AppEnvironmentExtra "PORT=3004"
+& $nssmPath set $serviceName AppEnvironmentExtra "PORT=3005"
 & $nssmPath set $serviceName AppEnvironmentExtra "PATH=$fullPath"
 
 Write-Host "Starting service..."

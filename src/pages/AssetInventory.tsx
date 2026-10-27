@@ -1,7 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-
-const INVENTORY_API_BASE = 'http://localhost:3005';
+import { apiFetch } from '../lib/api';
 
 export default function AssetInventory() {
   const [activeTab, setActiveTab] = useState<'import' | 'export'>('import');
@@ -9,20 +8,16 @@ export default function AssetInventory() {
 
   const [inventoryFile, setInventoryFile] = useState<File | null>(null);
   const [inventoryUploading, setInventoryUploading] = useState(false);
-  const [inventoryResult, setInventoryResult] = useState<{ success: boolean; message: string; successCount?: number; failCount?: number; totalCount?: number; preview?: any[] } | null>(null);
+  const [inventoryResult, setInventoryResult] = useState<{ success: boolean; message: string; successCount?: number; failCount?: number; totalCount?: number; preview?: Record<string, unknown>[] } | null>(null);
 
   const [inventoryZone, setInventoryZone] = useState('');
   const [inventoryExportFormat, setInventoryExportFormat] = useState('csv');
 
   const inventoryFileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    loadStats();
-  }, []);
-
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     try {
-      const res = await fetch(`${INVENTORY_API_BASE}/api/inventory/stats`);
+      const res = await apiFetch('/api/inventory/stats');
       const data = await res.json();
       if (data.success) {
         setStats(data.data);
@@ -30,9 +25,15 @@ export default function AssetInventory() {
     } catch {
       // 服务未启动
     }
-  };
+  }, []);
 
-  const handleUpload = async (collectionName: string, file: File | null, setUploading: (val: boolean) => void, setResult: (val: any) => void, setFile: (val: File | null) => void) => {
+  useEffect(() => {
+    // 延迟到 effect 提交后异步执行，避免在 effect 体内同步 setState
+    const timer = setTimeout(loadStats, 0);
+    return () => clearTimeout(timer);
+  }, [loadStats]);
+
+  const handleUpload = async (collectionName: string, file: File | null, setUploading: (val: boolean) => void, setResult: (val: unknown) => void, setFile: (val: File | null) => void) => {
     if (!file) return;
 
     setUploading(true);
@@ -43,7 +44,7 @@ export default function AssetInventory() {
     formData.append('collection', collectionName);
 
     try {
-      const res = await fetch(`${INVENTORY_API_BASE}/api/inventory/import`, {
+      const res = await apiFetch('/api/inventory/import', {
         method: 'POST',
         body: formData,
       });
@@ -60,13 +61,13 @@ export default function AssetInventory() {
   };
 
   const handleExport = async (collectionName: string, format: string, zone: string) => {
-    let url = `${INVENTORY_API_BASE}/api/inventory/export?collection=${collectionName}&format=${format}`;
+    let url = `/api/inventory/export?collection=${collectionName}&format=${format}`;
     if (zone && zone.trim()) {
       url += `&zone=${encodeURIComponent(zone.trim())}`;
     }
 
     try {
-      const res = await fetch(url);
+      const res = await apiFetch(url);
 
       if (!res.ok) {
         let msg = '导出失败';
@@ -108,7 +109,7 @@ export default function AssetInventory() {
     }
   };
 
-  const renderResult = (result: any) => {
+  const renderResult = (result: { success: boolean; message: string; successCount?: number; failCount?: number; totalCount?: number } | null) => {
     if (!result) return null;
     return (
       <div className={`mt-4 p-4 rounded-xl ${result.success ? 'bg-accent-green/10 border border-accent-green/20' : 'bg-red-500/10 border border-red-500/20'}`}>

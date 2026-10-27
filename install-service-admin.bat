@@ -28,7 +28,7 @@ if errorlevel 1 (
 echo [4/5] Configuring service...
 %NSSM% set %SVC% AppDirectory "%DIR%"
 %NSSM% set %SVC% Start SERVICE_AUTO_START
-%NSSM% set %SVC% AppEnvironmentExtra "PORT=3004"
+%NSSM% set %SVC% AppEnvironmentExtra "PORT=3005"
 %NSSM% set %SVC% AppEnvironmentExtra "PATH=C:\Program Files\nodejs;C:\Users\FJ\AppData\Local\Python\pythoncore-3.14-64;C:\Users\FJ\AppData\Local\Python\pythoncore-3.14-64\Scripts;C:\Users\FJ\Trae\.venv\Scripts;%PATH%"
 
 echo [5/5] Starting service...

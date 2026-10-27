@@ -12,12 +12,39 @@ import iconv from 'iconv-lite';
 import XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
 import fetch from 'node-fetch';
+import { createHash, randomBytes } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ==================== 环境变量加载（.env / .env.local）====================
+// 凭据只允许来自环境变量文件，禁止硬编码进源码。
+// 已存在的进程环境变量优先（如 PM2 ecosystem 中设置的 PORT）。
+function loadEnvFile(file) {
+  try {
+    if (!fs.existsSync(file)) return;
+    const content = fs.readFileSync(file, 'utf-8');
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let value = trimmed.slice(eq + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = value;
+    }
+  } catch (err) {
+    console.warn(`[Backend] 加载环境文件失败 ${file}:`, err.message);
+  }
+}
+loadEnvFile(path.join(__dirname, '.env'));
+loadEnvFile(path.join(__dirname, '.env.local'));
+
 const app = express();
-const PORT = process.env.PORT || 3004;
+const PORT = process.env.PORT || 3005;
 
 // Resolve Python path (SYSTEM account may not have it in PATH)
 // 多级回退策略，确保总能找到 Python
@@ -73,7 +100,7 @@ function resolvePython() {
 
   // 4. Try 'where python' (system PATH) — filter out WindowsApps stub
   try {
-    const whereResult = execSync('where python 2>nul', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const whereResult = execSync('where python 2>nul', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const lines = whereResult.trim().split('\n').filter(l => l.trim());
     for (const line of lines) {
       const cmd = line.trim();
@@ -95,6 +122,118 @@ console.log(`[Backend] Final Python command: ${PYTHON_CMD}`);
 
 app.use(cors({ exposedHeaders: ['Content-Disposition'] }));
 app.use(express.json());
+
+// ==================== 全局鉴权（默认拒绝）====================
+// 所有 /api/* 接口默认必须携带有效会话令牌，仅放行健康检查与登录接口。
+// 令牌由 POST /api/auth/login 校验 ADMIN_PASSWORD 后签发（内存会话，12 小时有效）。
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+// 拒绝 .env.example 中的占位密码被原样部署后直接登录
+const PLACEHOLDER_PASSWORD = 'CHANGE_ME_STRONG_PASSWORD';
+if (!ADMIN_PASSWORD) {
+  console.warn('[Backend] WARNING: 未配置 ADMIN_PASSWORD，登录接口将拒绝所有登录请求。请在 .env 中设置 ADMIN_PASSWORD。');
+} else if (ADMIN_PASSWORD === PLACEHOLDER_PASSWORD) {
+  console.warn('[Backend] WARNING: ADMIN_PASSWORD 仍为占位值 CHANGE_ME_STRONG_PASSWORD，已拒绝登录。请修改 .env 后重启服务。');
+}
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时
+const sessions = new Map(); // token -> { createdAt }
+
+// 登录限流：同一来源连续失败 5 次锁定 15 分钟（防暴力破解）
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const loginAttempts = new Map(); // ip -> { fails, lockedUntil }
+
+function clientIp(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || 'unknown';
+}
+
+function isLocalhost(ip) {
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip === 'localhost';
+}
+
+function createSession() {
+  // 密码学安全随机数生成会话令牌（不使用 Math.random）
+  const token = createHash('sha256').update(randomBytes(32)).digest('hex');
+  sessions.set(token, { createdAt: Date.now() });
+  return token;
+}
+function isValidSession(token) {
+  const s = sessions.get(token);
+  if (!s) return false;
+  if (Date.now() - s.createdAt > SESSION_TTL_MS) {
+    sessions.delete(token);
+    return false;
+  }
+  return true;
+}
+// 定期清理过期会话（每小时）
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, s] of sessions) {
+    if (now - s.createdAt > SESSION_TTL_MS) sessions.delete(token);
+  }
+}, 60 * 60 * 1000).unref?.();
+
+// 登录：本机(localhost)免密自动签发会话令牌；远程访问校验 ADMIN_PASSWORD（含 IP 限流与占位密码拒绝）
+app.post('/api/auth/login', (req, res) => {
+  const { password } = req.body || {};
+  const ip = clientIp(req);
+  const now = Date.now();
+  const rec = loginAttempts.get(ip) || { fails: 0, lockedUntil: 0 };
+
+  // 本地开发/本机使用：免密码直接签发会话令牌（远程访问不受影响，仍走下方密码校验）
+  if (isLocalhost(ip)) {
+    loginAttempts.delete(ip);
+    const token = createSession();
+    console.log(`[Backend] 本地访问免密登录: ${ip}`);
+    return res.json({ ok: true, token, expiresIn: SESSION_TTL_MS / 1000 });
+  }
+
+  // 限流：同一来源连续失败 LOGIN_MAX_FAILS 次后锁定 LOGIN_LOCK_MS
+  if (rec.lockedUntil > now) {
+    const waitMin = Math.ceil((rec.lockedUntil - now) / 60000);
+    return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${waitMin} 分钟后再试` });
+  }
+
+  if (!ADMIN_PASSWORD) {
+    return res.status(500).json({ ok: false, error: '服务端未配置 ADMIN_PASSWORD，无法登录' });
+  }
+  // 拒绝 .env.example 占位密码被原样部署后直接登录
+  if (ADMIN_PASSWORD === PLACEHOLDER_PASSWORD) {
+    return res.status(500).json({ ok: false, error: '服务端仍使用占位密码，请先修改 .env 的 ADMIN_PASSWORD 后重启' });
+  }
+  if (String(password || '') !== ADMIN_PASSWORD) {
+    rec.fails++;
+    if (rec.fails >= LOGIN_MAX_FAILS) {
+      rec.lockedUntil = now + LOGIN_LOCK_MS;
+      rec.fails = 0;
+      console.warn(`[Backend] 登录连续失败 ${LOGIN_MAX_FAILS} 次，已锁定 IP ${ip} 15 分钟`);
+    }
+    loginAttempts.set(ip, rec);
+    return res.status(401).json({ ok: false, error: '密码错误' });
+  }
+  loginAttempts.delete(ip);
+  const token = createSession();
+  res.json({ ok: true, token, expiresIn: SESSION_TTL_MS / 1000 });
+});
+
+// 退出登录：吊销会话
+app.post('/api/auth/logout', (req, res) => {
+  const token = req.headers['x-auth-token'];
+  if (token) sessions.delete(token);
+  res.json({ ok: true });
+});
+
+// 全局鉴权中间件：默认拒绝
+app.use('/api', (req, res, next) => {
+  if (req.path === '/health' || req.path.startsWith('/auth/')) {
+    return next();
+  }
+  const token = req.headers['x-auth-token'];
+  if (!token || !isValidSession(token)) {
+    return res.status(401).json({ ok: false, error: '未登录或会话已过期，请先登录' });
+  }
+  next();
+});
 
 const toolScripts = {
   'invoice-ocr': {
@@ -289,7 +428,7 @@ app.get('/api/tools/:id/call-count', (req, res) => {
 function killExistingProcesses(scriptPath) {
   try {
     const scriptName = path.basename(scriptPath);
-    const output = execSync('tasklist /FO CSV /NH', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const output = execSync('tasklist /FO CSV /NH', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const lines = output.trim().split('\n');
     for (const line of lines) {
       const parts = line.replace(/"/g, '').split(',');
@@ -297,13 +436,14 @@ function killExistingProcesses(scriptPath) {
         const pid = parseInt(parts[1]);
         if (!isNaN(pid) && pid > 0) {
           try {
-            const cmdline = execSync(`wmic process where processid=${pid} get commandline /value`, { 
-              encoding: 'utf-8', 
-              stdio: ['ignore', 'pipe', 'pipe'] 
+            const cmdline = execSync(`wmic process where processid=${pid} get commandline /value`, {
+              encoding: 'utf-8',
+              stdio: ['ignore', 'pipe', 'pipe'],
+              windowsHide: true
             });
             if (cmdline.includes(scriptName)) {
               console.log(`[Backend] Killing stale process: ${scriptName} (PID ${pid})`);
-              execSync(`taskkill /F /PID ${pid}`);
+              execSync(`taskkill /F /PID ${pid}`, { windowsHide: true });
             }
           } catch (_) {}
         }
@@ -410,7 +550,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
       ...process.env,
       PYTHONUNBUFFERED: '1',
       PYTHONIOENCODING: 'utf-8',
-      PLAYWRIGHT_BROWSERS_PATH: 'C:\\Users\\FJ\\AppData\\Local\\ms-playwright',
+      PLAYWRIGHT_BROWSERS_PATH: 'C:\\Users\\FJ\\Trae\\ms-playwright',
       PATH: `C:\\Program Files\\nodejs;C:\\Users\\FJ\\AppData\\Roaming\\npm;${process.env.PATH || ''}`,
       USERPROFILE: 'C:\\Users\\FJ',
       HOME: 'C:\\Users\\FJ',
@@ -580,7 +720,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
         console.log(`[${tool.name}] 超过 ${KILL_TIMEOUT / 60000} 分钟，强制终止 PID=${child.pid}`);
         if (process.platform === 'win32') {
           // Windows 上 SIGTERM 无效，用 taskkill
-          try { require('child_process').execSync(`taskkill /F /PID ${child.pid} /T`, { timeout: 10000 }); } catch (_) {}
+          try { require('child_process').execSync(`taskkill /F /PID ${child.pid} /T`, { timeout: 10000, windowsHide: true }); } catch (_) {}
         } else {
           try { child.kill('SIGTERM'); } catch (_) {}
           setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 5000);
@@ -702,7 +842,7 @@ app.post('/api/tools/:id/stop', async (req, res) => {
   }
 
   try {
-    execSync(`taskkill /F /PID ${running.process.pid}`);
+    execSync(`taskkill /F /PID ${running.process.pid}`, { windowsHide: true });
   } catch {
     try { running.process.kill('SIGTERM'); } catch {}
     setTimeout(() => {
@@ -731,7 +871,10 @@ app.get('/api/tools/:id/result', (req, res) => {
 });
 
 // ==================== OA审批：文本分析接口 ====================
-const DEEPSEEK_API_KEY = '***REDACTED***';
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+if (!DEEPSEEK_API_KEY) {
+  console.warn('[Backend] 缺少 DEEPSEEK_API_KEY，请在 .env 中配置（OA 文本分析将不可用）');
+}
 const DEEPSEEK_CHAT_API = 'https://api.deepseek.com/v1/chat/completions';
 const OA_TEMPLATES_PATH = path.join(__dirname, '..', 'oa_templates.json');
 const OA_LEARN_DIR = path.join(__dirname, '..', 'oa_learned');
@@ -902,9 +1045,19 @@ app.get('/api/tools/:id/logs', (req, res) => {
 });
 
 // ==================== 微信 CloudBase API 直连 ====================
-const WX_APPID = 'wx1739c040ef86b472';
-const WX_SECRET = '1b79aa3a1b03c0179fc2f3e70dbffd0e';
-const TCB_ENV = 'cloud1-d0g8kgm7o08c2d228';
+// 凭据从环境变量读取（.env / .env.local，均已 gitignore，禁止提交到仓库）
+const WX_APPID = process.env.WX_APPID || '';
+const WX_SECRET = process.env.WX_SECRET || '';
+const TCB_ENV = process.env.TCB_ENV || '';
+if (!WX_APPID || !WX_SECRET || !TCB_ENV) {
+  console.error('[Backend] 缺少微信云开发凭据：请在 .env 中配置 WX_APPID / WX_SECRET / TCB_ENV');
+  // 不退出进程，但 CloudBase 相关接口会返回明确错误；配置完成后重启即可
+}
+const ALLOWED_COLLECTIONS = new Set(['inventory_records', 'fixed_asset_records', 'region_store_map', 'inventory_users', 'certificate_evidence', 'casual_records', 'casual_signatures']);
+function validateCollection(name) {
+  if (!ALLOWED_COLLECTIONS.has(name)) throw new Error(`非法集合名: ${name}`);
+  return name;
+}
 const MAX_LIMIT = 100;
 
 let wxAccessToken = null;
@@ -950,6 +1103,16 @@ async function dbCount(collection, conditions = {}) {
   return data.total || data.count || 0;
 }
 
+// 安全计数：集合不存在时返回 0，不阻塞统计接口
+async function safeDbCount(collection) {
+  try {
+    return await dbCount(collection);
+  } catch (e) {
+    console.error(`[Backend] dbCount(${collection}) failed:`, e.message);
+    return 0;
+  }
+}
+
 async function dbList(collection, conditions = {}) {
   const where = JSON.stringify(conditions);
   let allData = [];
@@ -985,8 +1148,24 @@ const upload = multer({ dest: path.join(__dirname, 'uploads') });
 
 // ==================== 统一数据访问层 ====================
 
+// 自动检测 CSV 编码：支持 UTF-8（含 BOM）/ GBK / GB2312
+// 与前端页面承诺的编码支持保持一致
+function decodeCSVBuffer(buffer) {
+  // 1. UTF-8 BOM
+  if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
+    return buffer.slice(3).toString('utf-8');
+  }
+  // 2. 严格 UTF-8 解码成功 → UTF-8 文件
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch (_) {
+    // 3. 否则按 GBK 解码（GB2312 是 GBK 子集，一并覆盖）
+    return iconv.decode(buffer, 'gbk');
+  }
+}
+
 function parseCSV(buffer) {
-  let csvString = iconv.decode(buffer, 'cp936');
+  let csvString = decodeCSVBuffer(buffer);
   if (csvString.charCodeAt(0) === 0xFEFF) {
     csvString = csvString.slice(1);
   }
@@ -1035,7 +1214,7 @@ app.post('/api/inventory/import', upload.single('file'), async (req, res) => {
       return res.json({ success: false, message: '请选择文件' });
     }
     
-    const collectionName = req.body.collection || 'fixed_asset_records';
+    const collectionName = validateCollection(req.body.collection || 'inventory_records');
     const buffer = fs.readFileSync(req.file.path);
     const ext = path.extname(req.file.originalname || '').toLowerCase();
     let headers, rows, isSAPFormat;
@@ -1187,32 +1366,82 @@ app.post('/api/inventory/import', upload.single('file'), async (req, res) => {
         })
       : mappedRecords.filter(row => row['产品型号']);
     
-    // 先读取旧记录 ID（暂不删除，防止插入失败时数据丢失）
+    // 事务性导入：任何一条新记录插入失败 → 回滚已插入的新记录并保留旧数据
     const oldRecords = await fetchAllRecords(collectionName);
     const oldIds = new Set(oldRecords.map(r => r._id));
 
-    // 先插入新数据
     let successCount = 0;
     let failCount = 0;
+    const insertedIds = []; // 本次新插入的记录 ID（用于失败回滚）
     // 批量并发插入，每批 20 条
     const BATCH = 20;
     for (let i = 0; i < validRecords.length; i += BATCH) {
       const batch = validRecords.slice(i, i + BATCH);
       const results = await Promise.allSettled(batch.map(r => dbAdd(collectionName, r)));
-      results.forEach(r => {
-        if (r.status === 'fulfilled') successCount++;
-        else { console.error('导入单条失败:', r.reason?.message); failCount++; }
+      results.forEach((r) => {
+        if (r.status === 'fulfilled') {
+          successCount++;
+          insertedIds.push(r.value);
+        } else {
+          console.error('导入单条失败:', r.reason?.message);
+          failCount++;
+        }
+      });
+      if (failCount > 0) break; // 出现失败立即停止后续插入
+    }
+
+    if (failCount > 0) {
+      // 回滚本次已插入的新记录，旧数据保持原样
+      let rolledBack = 0;
+      let rollbackFailed = 0;
+      for (let i = 0; i < insertedIds.length; i += BATCH) {
+        const batch = insertedIds.slice(i, i + BATCH);
+        const results = await Promise.allSettled(batch.map(id => dbRemove(collectionName, id)));
+        results.forEach(r => {
+          if (r.status === 'fulfilled') rolledBack++;
+          else rollbackFailed++;
+        });
+      }
+      return res.json({
+        success: false,
+        message: rollbackFailed > 0
+          ? `导入失败：${failCount} 条记录插入失败，已回滚 ${rolledBack} 条，另有 ${rollbackFailed} 条新记录回滚失败（请人工清理这 ${rollbackFailed} 条），旧数据未删除（保留 ${oldIds.size} 条）`
+          : `导入失败：${failCount} 条记录插入失败，已回滚新插入的 ${rolledBack} 条，旧数据未删除（保留 ${oldIds.size} 条）`,
+        successCount,
+        failCount,
+        rolledBack,
+        rollbackFailed,
+        keptOldCount: oldIds.size,
+        totalCount: validRecords.length
       });
     }
 
-    // 插入成功后再批量删除旧记录
+    // 全部插入成功后再批量删除旧记录
     let deletedCount = 0;
+    let deleteFailed = 0;
     // 批量并发删除
     const oldArr = [...oldIds];
     for (let i = 0; i < oldArr.length; i += BATCH) {
       const batch = oldArr.slice(i, i + BATCH);
       const results = await Promise.allSettled(batch.map(id => dbRemove(collectionName, id)));
-      results.forEach(r => { if (r.status === 'fulfilled') deletedCount++; });
+      results.forEach(r => {
+        if (r.status === 'fulfilled') deletedCount++;
+        else deleteFailed++;
+      });
+    }
+
+    // 旧数据未能全部删除时不得返回"全成功"：如实报告部分失败，避免新旧数据并存被掩盖
+    if (deleteFailed > 0) {
+      return res.json({
+        success: false,
+        message: `导入完成但清理不完整：已导入 ${successCount} 条，旧数据删除失败 ${deleteFailed} 条（共 ${oldArr.length} 条），当前新旧数据并存，请重试导入或人工清理`,
+        successCount,
+        failCount,
+        deletedCount,
+        deleteFailed,
+        totalCount: validRecords.length,
+        preview: validRecords.slice(0, 5)
+      });
     }
     
     res.json({
@@ -1230,10 +1459,13 @@ app.post('/api/inventory/import', upload.single('file'), async (req, res) => {
   }
 });
 
-app.get('/api/inventory/export', async (req, res) => {
+async function buildInventoryExport(req, res, opts = {}) {
   try {
-    const collectionName = req.query.collection || 'fixed_asset_records';
+    const collectionName = validateCollection(opts.collectionName || req.query.collection || 'fixed_asset_records');
     const format = req.query.format || 'csv';
+    const reportTitle = opts.reportTitle || (collectionName === 'fixed_asset_records' ? '固定资产盘点报告' : '样机盘点报告');
+    const signatureCollection = opts.signatureCollection || collectionName;
+    const exportPrefix = opts.exportPrefix || '';
 
     const conditions = {};
     if (req.query.zone) {
@@ -1264,6 +1496,7 @@ app.get('/api/inventory/export', async (req, res) => {
     }
     
     // ====== 第一步：应用与小程序 getAllInventoryRecordsForExport 完全一致的数据映射 ======
+    const isCasual = collectionName === 'casual_records';
     const mappedData = isFixedAsset ? filteredData.map(item => ({
       _id: item._id,
       资产代码: item['资产代码'] || '',
@@ -1311,16 +1544,22 @@ app.get('/api/inventory/export', async (req, res) => {
       机身码: item['机身码'] || '',
       备注: item['备注'] || '',
       盘点人: item['盘点人'] || '',
+      来源: item['来源'] || '正式盘点',
     }));
+
+    // 随手盘：按产品线排序聚组（Excel/PDF 一份文件内按产品线分组展示）
+    if (isCasual) {
+      mappedData.sort((a, b) => String(a['产品线'] || '').localeCompare(String(b['产品线'] || ''), 'zh'));
+    }
     
     // ====== 第二步：使用与小程序 exportExcel 云函数完全一致的字段键和表头 ======
     const fieldKeys = isFixedAsset
       ? ['序号', '资产代码', '公司代码', '资产', '资产分类描述', '资产名称', '型号', '数量', '资本化日期', '不活动日期', '资产主号文本', '库存地址', '资产类型', '报销单号', '购置日期', '购置价值', '累计折旧', '净值', '减值准备', '账面价值', '原值', '功能范围', 'WBS描述', '战区', '部门负责人', '盘点人', '盘点数量', '实盘数量', '资产状态', '使用部门', '使用人', '使用地点', '备注']
-      : ['大区', '战区', '仓库名称', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
+      : ['大区', '战区', '仓库名称', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人', '来源'];
 
     const headerNames = isFixedAsset
       ? ['序号', '公司代码+资产代码', '公司代码', '资产', '资产分类描述', '资产名称', '型号', '数量', '资本化日期', '不活动日期', '资产主号文本', '库存注记', '资产类型名', '固定资产报销单号', '购置资产日期', '购置价值', '累计折旧', '净值', '减值准备', '账面价值', '原值', '功能范围', 'WBS描述', '战区/部门', '部门负责人', '盘点人', '盘点数量', '实盘数量', '信息变更', '资产状态', '使用部门', '使用人', '使用地点', '备注']
-      : ['序号', '大区', '战区', '仓库名称（分品类）', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人'];
+      : ['序号', '大区', '战区', '仓库名称（分品类）', '产品线', '产品型号', '库存', '实盘数', '机身码', '备注', '盘点人', '来源'];
 
     // 构建数据行，序号自动补
     let rows = mappedData.map((item, i) => {
@@ -1351,6 +1590,8 @@ app.get('/api/inventory/export', async (req, res) => {
       const zone = req.query.zone || '';
       exportName = zone ? `${zone}盘点明细` : '盘点门店';
     }
+    // 随手盘等独立系统：文件名加前缀区分（如 随手盘-XX盘点明细）
+    exportName = exportPrefix + exportName;
     
     if (format === 'xlsx') {
       // 本地生成 Excel，格式与小程序 exportExcel 云函数完全一致
@@ -1389,14 +1630,17 @@ app.get('/api/inventory/export', async (req, res) => {
       } catch (_) {}
       // 标题
       doc.fontSize(12).font('CN').fill('#1a3a5c').text('TCL智能科技（宁波）有限公司', m, 16, { align: 'center' });
-      doc.fontSize(12).fill('#1a3a5c').text(isFixedAsset ? '固定资产盘点报告' : '样机盘点报告', m, doc.y + 2, { align: 'center' });
+      doc.fontSize(12).fill('#1a3a5c').text(reportTitle, m, doc.y + 2, { align: 'center' });
       doc.moveTo(m, doc.y + 8).lineTo(pageW - m, doc.y + 8).stroke('#cccccc');
 
-      // 查询签名数据（含签名图片）
+      // 查询签名数据（含签名图片）——必须按门店/战区过滤，避免多门店导出时签名张冠李戴
       let checkerName = '', confirmerName = '', certId = '', notice = null;
       let checkerB64 = '', confirmerB64 = '';
       try {
-        const sigRecords = await dbList(collectionName, { recordType: 'signature' });
+        const sigCond = { recordType: 'signature' };
+        if (req.query.store) sigCond['仓库名称'] = req.query.store;
+        if (req.query.zone) sigCond['战区'] = req.query.zone;
+        const sigRecords = await dbList(signatureCollection, sigCond);
         if (sigRecords.length > 0) {
           const r = sigRecords[0];
           checkerName = r['盘点人'] || '';
@@ -1453,7 +1697,12 @@ app.get('/api/inventory/export', async (req, res) => {
         // 横线
         doc.moveTo(m, y + rH).lineTo(m + tableW, y + rH).lineWidth(0.5).stroke('#b0b8c0');
         x = m;
-        row.forEach((cell, ci) => { doc.text(String(cell != null ? cell : ''), x + 2, y + 3, { width: colDefs[ci].w - 4, align: 'center', lineBreak: false }); x += colDefs[ci].w; });
+        // 按 colDefs 列数渲染（rows 末尾的「来源」等附加列不进入 PDF）
+        for (let ci = 0; ci < colDefs.length; ci++) {
+          const cell = row[ci];
+          doc.text(String(cell != null ? cell : ''), x + 2, y + 3, { width: colDefs[ci].w - 4, align: 'center', lineBreak: false });
+          x += colDefs[ci].w;
+        }
         doc.fill('#000000');
         y += rH;
       });
@@ -1521,7 +1770,7 @@ app.get('/api/inventory/export', async (req, res) => {
       doc.text(`报告生成时间：${new Date().toISOString()}`, { align: 'center' });
       doc.end();
     } else {
-      let csv = headers.join(',') + '\n';
+      let csv = '\uFEFF' + headers.join(',') + '\n';
       rows.forEach(row => {
         csv += row.map(cell => {
           const val = String(cell);
@@ -1533,7 +1782,7 @@ app.get('/api/inventory/export', async (req, res) => {
       });
       
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      const csvFilename = `盘点门店_${Date.now()}.csv`;
+      const csvFilename = `${exportPrefix}盘点门店_${Date.now()}.csv`;
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(csvFilename)}`);
       res.send(csv);
     }
@@ -1541,11 +1790,26 @@ app.get('/api/inventory/export', async (req, res) => {
     console.error('导出失败:', err);
     res.json({ success: false, message: '导出失败：' + err.message });
   }
+}
+
+// 样机盘点 / 固定资产导出
+app.get('/api/inventory/export', (req, res) => {
+  buildInventoryExport(req, res, {});
+});
+
+// 随手盘导出（独立集合 casual_records / casual_signatures，数据格式与样机盘点完全一致）
+app.get('/api/casual/export', (req, res) => {
+  buildInventoryExport(req, res, {
+    collectionName: 'casual_records',
+    reportTitle: '样机盘点报告',
+    signatureCollection: 'casual_signatures',
+    exportPrefix: '随手盘-',
+  });
 });
 
 app.get('/api/inventory/photos', async (req, res) => {
   try {
-    const collectionName = req.query.collection || 'fixed_asset_records';
+    const collectionName = validateCollection(req.query.collection || 'inventory_records');
     const conditions = {};
     if (req.query.zone) {
       conditions['战区'] = req.query.zone;
@@ -1599,20 +1863,73 @@ app.get('/api/inventory/photo/download', async (req, res) => {
 
 app.get('/api/inventory/stats', async (req, res) => {
   try {
-    const [fixedCount, invCount] = await Promise.all([
-      dbCount('fixed_asset_records'),
-      dbCount('inventory_records')
+    const [fixedCount, invCount, casualCount] = await Promise.all([
+      safeDbCount('fixed_asset_records'),
+      safeDbCount('inventory_records'),
+      safeDbCount('casual_records')
     ]);
 
     res.json({
       success: true,
       data: {
         fixed_asset_records: fixedCount,
-        inventory_records: invCount
+        inventory_records: invCount,
+        casual_records: casualCount
       }
     });
   } catch (err) {
     res.json({ success: false, message: err.message });
+  }
+});
+
+// 修改小程序访问密码（仅付建管理员可改，需当前密码）
+// 哈希算法与云函数 accessAuth 保持一致：sha256(password + SALT)
+const ACCESS_PASSWORD_SALT = 'tcl-inventory-access-salt-v1';
+const ACCESS_PASSWORD_KEY = 'access_password_hash';
+const ADMIN_NAME = '付建';
+
+function hashAccessPassword(password) {
+  return createHash('sha256').update(String(password) + ACCESS_PASSWORD_SALT).digest('hex');
+}
+
+app.post('/api/access/password', async (req, res) => {
+  try {
+    // 已通过全局鉴权中间件（必须携带有效会话令牌），此处无需再校验令牌
+    const { adminName, oldPassword, newPassword } = req.body || {};
+    const name = String(adminName || '').trim();
+    const oldPwd = String(oldPassword || '');
+    const newPwd = String(newPassword || '');
+
+    if (name !== ADMIN_NAME) {
+      return res.json({ ok: false, error: `仅 ${ADMIN_NAME}（管理员）可修改访问密码` });
+    }
+    if (newPwd.length < 6) {
+      return res.json({ ok: false, error: '新密码至少 6 位' });
+    }
+
+    // 校验管理员身份：inventory_users 中 role=管理员 且 name=付建
+    const admins = await dbList('inventory_users', { name: ADMIN_NAME, role: '管理员' });
+    if (admins.length === 0) {
+      return res.json({ ok: false, error: '管理员身份校验失败：未找到 ' + ADMIN_NAME + ' 的管理员记录' });
+    }
+
+    // 读取当前密码哈希并校验
+    const configs = await dbList('app_config', { key: ACCESS_PASSWORD_KEY });
+    if (configs.length === 0) {
+      return res.json({ ok: false, error: '尚未设置访问密码，请先通过 initDb 初始化' });
+    }
+    const curHash = String(configs[0].value || '');
+    if (curHash && hashAccessPassword(oldPwd) !== curHash) {
+      return res.json({ ok: false, error: '当前密码不正确' });
+    }
+
+    // 更新密码哈希
+    await tcbApi('databaseupdate', `db.collection('app_config').where({key:'${ACCESS_PASSWORD_KEY}'}).update({data:{value:'${hashAccessPassword(newPwd)}', updatedAt: new Date()}})`);
+    console.log('[Backend] 访问密码已由管理后台修改:', name);
+    return res.json({ ok: true, message: '访问密码已更新' });
+  } catch (err) {
+    console.error('[Backend] 修改访问密码失败:', err);
+    return res.status(500).json({ ok: false, error: '修改失败：' + (err.message || '未知错误') });
   }
 });
 
@@ -1631,12 +1948,12 @@ server.on('error', (err) => {
     console.log(`[Backend] Port ${PORT} is in use, attempting to free it...`);
     try {
       // 找到占用端口的 PID 并杀掉
-      const netstatOut = execSync(`netstat -ano | findstr ":${PORT} " | findstr "LISTENING"`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const netstatOut = execSync(`netstat -ano | findstr ":${PORT} " | findstr "LISTENING"`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       const match = netstatOut.match(/\s+(\d+)\s*$/m);
       if (match) {
         const stalePid = match[1].trim();
         console.log(`[Backend] Killing stale process PID ${stalePid} on port ${PORT}...`);
-        execSync(`taskkill /F /PID ${stalePid}`, { stdio: ['ignore', 'pipe', 'pipe'] });
+        execSync(`taskkill /F /PID ${stalePid}`, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
         console.log(`[Backend] Stale process killed, retrying in 2s...`);
       }
     } catch (e) {
@@ -1672,7 +1989,7 @@ const cleanup = async () => {
     for (const [id, info] of runningProcesses) {
       try {
         console.log(`[Backend] Killing process: ${id} (PID ${info.process.pid})`);
-        execSync(`taskkill /F /PID ${info.process.pid}`);
+        execSync(`taskkill /F /PID ${info.process.pid}`, { windowsHide: true });
       } catch {
         try { info.process.kill('SIGTERM'); } catch {}
       }

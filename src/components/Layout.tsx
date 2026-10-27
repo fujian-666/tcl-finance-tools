@@ -1,9 +1,16 @@
-import { Outlet, Link, useLocation } from 'react-router-dom';
+import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { platformStats, slogan } from '../data/tools';
+import { isLoggedIn, logout } from '../lib/api';
 
 export default function Layout() {
   const location = useLocation();
+  const navigate = useNavigate();
   const isHome = location.pathname === '/';
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
 
   return (
     <div className="min-h-screen bg-bg-primary relative">
@@ -49,6 +56,18 @@ export default function Layout() {
               <span className="text-[10px] text-text-muted hidden sm:inline px-2 py-1 rounded-md bg-white/[0.02] border border-white/[0.03]">
                 {platformStats.platformVersion}
               </span>
+              {isLoggedIn() && (
+                <button
+                  onClick={handleLogout}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-text-secondary hover:text-red-400 hover:bg-red-500/10 transition-all duration-300"
+                  title="退出登录"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  退出
+                </button>
+              )}
             </div>
           </div>
         </div>

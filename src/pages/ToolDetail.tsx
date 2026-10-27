@@ -146,6 +146,8 @@ export default function ToolDetail() {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       if (clearResultRef.current) clearTimeout(clearResultRef.current);
     };
+    // 初始状态检查仅在挂载时执行一次，函数定义在下方（闭包在渲染后可用）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // OA审批：一劳永逸 —— 只要完成就自动拉取结果
@@ -153,6 +155,8 @@ export default function ToolDetail() {
     if (isOA && resultType === 'success') {
       fetchOAResult();
     }
+    // fetchOAResult 每次渲染重建，加入依赖会导致该 effect 反复执行，故按语义仅依赖触发条件
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resultType, isOA]);
 
   const checkInitialStatus = async () => {
