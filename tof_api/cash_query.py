@@ -109,6 +109,10 @@ def parse_args(argv=None):
                    help='输出 xlsx 路径（默认 兑现申请单据查询_<时间戳>.xlsx）')
     p.add_argument('--auth-file', default='',
                    help='auth.json 路径（默认读环境变量 TOF_AUTH_JSON / TOF_BEARER_TOKEN）')
+    p.add_argument('--no-renew', action='store_true',
+                   help='token 过期时不自动续期，直接失败（默认开浏览器免登续期后重试一次）')
+    p.add_argument('--renew-headful', action='store_true',
+                   help='续期时弹出可见浏览器；SSO 登录态也过期时，用它在弹出的窗口手动登录一次')
     p.add_argument('--dry-run', action='store_true',
                    help='只打印最终生效的全部筛选条件，不发请求')
     # 平台约定参数：发送由平台侧统一负责，脚本侧接受但忽略（见 README「飞书口径」）
@@ -228,6 +232,32 @@ def write_xlsx(rows, out_path):
     wb.save(out_path)
 
 
+def _fetch_with_renew(args, form):
+    """拉数 + token 过期自动续期：AuthExpired 时免登续期一次再重试；
+    重试仍过期（SSO 登录态也掉了）→ AuthExpired 冒泡，按退出码 3 报错，
+    提示用 --renew-headful 手动登录一次。"""
+
+    def once():
+        client = TofClient(auth_file=args.auth_file or None)
+        return fetch_all(client, form, args.max_pages)
+
+    try:
+        return once()
+    except AuthExpired:
+        if args.no_renew:
+            raise
+        import renew
+        if not renew.available():
+            raise SystemExit('[认证过期] 本机未安装 playwright，无法自动续期；'
+                             '请安装后重试，或手工更新 TOF_BEARER_TOKEN')
+        mode = '可见浏览器' if args.renew_headful else '后台浏览器'
+        print(f'[token] 已过期，自动续期中（{mode}，免登）…', file=sys.stderr)
+        out = renew.renew_auth(auth_file=args.auth_file or None,
+                               headless=not args.renew_headful)
+        print(f'[token] 续期成功 → {out}，重试查询', file=sys.stderr)
+        return once()
+
+
 def main(argv=None):
     args = parse_args(argv)
     start = date.fromisoformat(args.start_date)
@@ -247,9 +277,8 @@ def main(argv=None):
     for line in describe_filters(args):
         print(f'  {line}', file=sys.stderr)
 
-    client = TofClient(auth_file=args.auth_file or None)
     t0 = time.time()
-    rows, total = fetch_all(client, form, args.max_pages)
+    rows, total = _fetch_with_renew(args, form)
     check_status_filter(rows, args.process_status_codes)
 
     out = Path(args.out) if args.out else Path(
