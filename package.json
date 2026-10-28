@@ -15,6 +15,7 @@
     "@cloudbase/js-sdk": "^3.6.3",
     "@cloudbase/node-sdk": "^3.18.3",
     "@zxing/library": "^0.23.0",
+    "compression": "^1.8.2",
     "cors": "^2.8.6",
     "express": "~5.2.1",
     "iconv-lite": "^0.7.2",
