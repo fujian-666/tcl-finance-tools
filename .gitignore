@@ -10,6 +10,7 @@ __pycache__/
 # 运行时数据
 logs/
 uploads/
+exports/
 *.log
 oa_learned/
 oa_templates.json
