@@ -15,6 +15,7 @@ import XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
 import fetch from 'node-fetch';
 import { createHash, randomBytes } from 'crypto';
+import { deliverArtifact } from './lib/lark.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -695,6 +696,8 @@ app.post('/api/tools/:id/run', async (req, res) => {
   // 在函数作用域声明：所有完成路径（关键词失败 / exit / close / 超时 / 启动失败）共用一个 markCompleted
   let killTimer = null, keepaliveRef = null, graceTimer = null;
   let sawFinishHint = false;
+  // 本轮产物路径：脚本按约定把产物绝对路径打到 stdout，进程成功退出后据此投递飞书
+  let lastArtifactPath = null;
 
   // 唯一完成入口：只有进程真正结束才写 completedProcesses。
   // 原来关键词先到就标记完成，但进程还在写文件/发飞书——前端已显示"运行完成"，
@@ -711,6 +714,26 @@ app.post('/api/tools/:id/run', async (req, res) => {
     runningProcesses.delete(id);
     console.log(`[${tool.name}] 标记完成: exitCode=${exitCode}, message=${message}`);
     broadcastTool(id, 'status', { running: false, exitCode, message, endTime, timeoutMs: RUN_TIMEOUT_MS });
+
+    // 产物投递（issue #6 口径 A：平台侧统一发送）。
+    // 只有进程成功退出 + 本轮产物确实存在才发；凭据缺失时跳过，不影响主流程。
+    // 发送失败不吞：控制台告警 + SSE 推一行到平台日志（产物路径本身仍在日志里可下载）。
+    if (exitCode === 0 && lastArtifactPath) {
+      const artifact = lastArtifactPath;
+      const report = (line, warn) => {
+        if (warn) console.warn(`[${tool.name}] ${line}`);
+        else console.log(`[${tool.name}] ${line}`);
+        if (processLogs.has(id)) processLogs.get(id).push(line);
+        broadcastTool(id, 'log', { line });
+      };
+      deliverArtifact({ filePath: artifact, toolName: tool.name })
+        .then((r) => {
+          if (r.ok) report(`[飞书] 已发送产物 ${path.basename(artifact)}（message_id=${r.messageId || '-'}）`);
+          else if (r.skipped) console.log(`[${tool.name}] [飞书] 跳过发送：${r.reason}`);
+          else report(`[飞书] 发送失败：${r.reason}`, true);
+        })
+        .catch((err) => report(`[飞书] 发送异常：${err.message}`, true));
+    }
     // 完成状态保留 1 小时、日志保留 10 分钟（原来都是 5 分钟，
     // 超时后前端拿不到 exitCode，会走"视为成功"分支造成假成功）
     setTimeout(() => completedProcesses.delete(id), COMPLETED_TTL_MS);
@@ -756,6 +779,9 @@ app.post('/api/tools/:id/run', async (req, res) => {
       if (processLogs.has(id)) processLogs.get(id).push(line);
       broadcastTool(id, 'log', { line });
       checkFinishHint(line);
+      // 记录产物路径：脚本约定把产物绝对路径打到 stdout，这里取行内最后一个路径
+      const artifactMatch = line.match(/([A-Za-z]:\\[^"'<>|\r\n]*?\.(?:xlsx|xls|csv|zip|pdf))/i);
+      if (artifactMatch) lastArtifactPath = artifactMatch[1];
 
       // OA审批：捕获结构化结果JSON
       if (isOA) {
