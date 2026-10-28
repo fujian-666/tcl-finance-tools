@@ -299,7 +299,8 @@ const toolScripts = {
   },
   'cash-application-query': {
     name: '兑现申请单据查询',
-    script: path.join(__dirname, '..', 'tof_cash_export.py'),
+    // TOF 接口直连版（去浏览器化），配方见 tof_api/README.md
+    script: path.join(__dirname, 'tof_api', 'cash_query.py'),
   },
 };
 
