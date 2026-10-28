@@ -48,11 +48,15 @@ xfz-survey 逆向调查产物（1989 接口静态目录 + 558 页实测抓包 + 
 
 #### 飞书口径
 
-本脚本**只落本地 xlsx 并打印绝对路径，不发送飞书**。原因：原 `tof_cash_export.py`
-的 `send_feishu_file()`（token→上传→发消息三段）依赖该机器上的应用凭据与收件人配置，
-仓库里没有、也不该硬编码；平台侧（tcl-finance-tools 服务端）负责把产物交付给用户。
-如需恢复"跑完自动发飞书"，应把三段抽成 `tof_api/lark.py` 由平台统一调用，而不是
-每个脚本各带一份凭据。
+口径已定：**工具只产文件，发送由平台统一负责**（[issue #6](https://github.com/fujian-666/tcl-finance-tools/issues/6)
+决策 A，平台侧实现见 [PR #7](https://github.com/fujian-666/tcl-finance-tools/pull/7)）。
+
+- 本脚本只落本地 xlsx，并在最后一行 stdout 打印**绝对路径**；不读飞书凭据、不发起发送；
+- 平台侧（`server.js` + `lib/lark.js`）在 `exitCode === 0` 且从日志解析到产物路径时，
+  用 `.env` 的 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_NOTIFY_OPEN_ID` 上传并发送；
+- `--no-lark` 是平台对个别工具透传的约定参数，本脚本接受但忽略（无副作用）；
+- 发送失败不吞：平台写日志 + UI 提示，产物路径仍然可见可下载；
+- 后续 5 张帆软报表迁移沿用同一口径，脚本侧均不实现发送。
 
 ### 凭据配置（.env）
 

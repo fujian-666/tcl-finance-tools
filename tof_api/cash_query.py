@@ -111,6 +111,8 @@ def parse_args(argv=None):
                    help='auth.json 路径（默认读环境变量 TOF_AUTH_JSON / TOF_BEARER_TOKEN）')
     p.add_argument('--dry-run', action='store_true',
                    help='只打印最终生效的全部筛选条件，不发请求')
+    # 平台约定参数：发送由平台侧统一负责，脚本侧接受但忽略（见 README「飞书口径」）
+    p.add_argument('--no-lark', action='store_true', help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if args.no_process_status:
         args.process_status_codes = ''
