@@ -277,21 +277,24 @@ const toolScripts = {
     name: '华南大区空调品类合同内未兑付自动化催办',
     script: path.join(__dirname, '..', 'auto_export_rebate.py'),
   },
+  // 以下 4 张帆软报表统一走 tof_api/fine_report 引擎（--report <工具id> 选报表）：
+  // 直连 cpt + 工具栏「大数据集导出」，取数口径与报表配置见 tof_api/fine_report/README.md。
+  // 身份/配置档由 .env 注入：FR_USER_ID（必须 TOF 登录名）、FR_USER_NAME、FR_BROWSER_PROFILE。
   'subsidy-tracking': {
     name: '华南大区空调品类补贴跟进表',
-    script: path.join(__dirname, '..', 'auto_export_subsidy.py'),
+    script: path.join(__dirname, 'tof_api', 'fine_report', 'runner.py'),
   },
   'settlement-freeze': {
     name: '华南大区客户费用明细报表',
-    script: path.join(__dirname, '..', 'settlement_freeze_export.py'),
+    script: path.join(__dirname, 'tof_api', 'fine_report', 'runner.py'),
   },
   'settlement-gross-profit': {
     name: '华南大区毛利及费用明细报表',
-    script: path.join(__dirname, '..', 'settlement_gross_profit_export.py'),
+    script: path.join(__dirname, 'tof_api', 'fine_report', 'runner.py'),
   },
   'settlement-adjust': {
     name: '华南大区调整项明细报表',
-    script: path.join(__dirname, '..', 'settlement_adjust_export.py'),
+    script: path.join(__dirname, 'tof_api', 'fine_report', 'runner.py'),
   },
   'oa-approval': {
     name: 'OA审批助手',
@@ -303,6 +306,11 @@ const toolScripts = {
     script: path.join(__dirname, 'tof_api', 'cash_query.py'),
   },
 };
+
+// 走 fine_report 引擎的工具：工具 id 与 runner.py 的报表 id 一致，直接 --report <id>。
+const FINEREPORT_TOOL_IDS = new Set([
+  'subsidy-tracking', 'settlement-freeze', 'settlement-gross-profit', 'settlement-adjust',
+]);
 
 const runningProcesses = new Map();
 const completedProcesses = new Map();
@@ -596,10 +604,7 @@ app.post('/api/tools/:id/run', async (req, res) => {
 
   const isInvoiceOcr = id === 'invoice-ocr';
   const isMonitor = id === 'deepseek-monitor';
-  const isSubsidy = id === 'subsidy-tracking';
-  const isFreeze = id === 'settlement-freeze';
-  const isGrossProfit = id === 'settlement-gross-profit';
-  const isAdjust = id === 'settlement-adjust';
+  const isFineReport = FINEREPORT_TOOL_IDS.has(id);
   const isCashApp = id === 'cash-application-query';
   const isOA = id === 'oa-approval';
 
@@ -615,7 +620,8 @@ app.post('/api/tools/:id/run', async (req, res) => {
   if (isMonitor) {
     args.push('--no-lark');
   }
-  if (isSubsidy) {
+  // 日期区间：4 张帆软报表与兑现申请单据查询都按 --start-date/--end-date 透传
+  if (isFineReport || isCashApp) {
     const { startDate, endDate } = req.body || {};
     if (startDate) {
       args.push('--start-date', startDate);
@@ -624,41 +630,15 @@ app.post('/api/tools/:id/run', async (req, res) => {
       args.push('--end-date', endDate);
     }
   }
-  if (isFreeze) {
-    const { startDate, endDate } = req.body || {};
-    if (startDate) {
-      args.push('--start-date', startDate);
-    }
-    if (endDate) {
-      args.push('--end-date', endDate);
-    }
-  }
-  if (isGrossProfit) {
-    const { startDate, endDate } = req.body || {};
-    if (startDate) {
-      args.push('--start-date', startDate);
-    }
-    if (endDate) {
-      args.push('--end-date', endDate);
-    }
-  }
-  if (isAdjust) {
-    const { startDate, endDate } = req.body || {};
-    if (startDate) {
-      args.push('--start-date', startDate);
-    }
-    if (endDate) {
-      args.push('--end-date', endDate);
-    }
-  }
-  if (isCashApp) {
-    const { startDate, endDate } = req.body || {};
-    if (startDate) {
-      args.push('--start-date', startDate);
-    }
-    if (endDate) {
-      args.push('--end-date', endDate);
-    }
+  if (isFineReport) {
+    // 产物统一落到 exports/（已 gitignore），绝对路径由脚本打到 stdout，
+    // 上面按行抓取后由平台统一投递飞书（issue #6 口径 A）。
+    // --headless：平台侧无人值守，2026-10-28 实测无头与有头取数结果一致（2968 行）。
+    const outDir = path.join(__dirname, 'exports');
+    fs.mkdirSync(outDir, { recursive: true });
+    args.push('--report', id,
+              '--headless',
+              '--out', path.join(outDir, `${id}_${Date.now()}.xlsx`));
   }
   if (isOA) {
     const { oaUrl } = req.body || {};
