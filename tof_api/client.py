@@ -8,10 +8,13 @@
 凭据解析（优先级从高到低）：
   1. 构造参数 auth_file（cash_query.py 的 --auth-file 透传）
   2. 环境变量 TOF_AUTH_JSON    → 指向 xfz-survey/auth.json（含 token + cookie）
-  3. 环境变量 TOF_BEARER_TOKEN → 直接贴 token（浏览器 devtools 里 Authorization 头的值，
-     带不带 bearer 前缀均可）
+  3. 续期缓存 tof-auth.json    → renew.py 自动续期写入（无文件凭据时的落点）
+  4. 环境变量 TOF_BEARER_TOKEN → 直接贴 token（浏览器 devtools 里 Authorization 头的值，
+     带不带 bearer 前缀均可；⚠️ 排在缓存之后：缓存由续期保持最新，若手动更新
+     此变量请先删缓存 tof-auth.json，否则会被缓存盖过）
 
-access token 有效期只有几小时：过期后本模块抛 AuthExpired，按提示更新凭据即可。
+access token 有效期只有几小时：过期后抛 AuthExpired；cash_query.py 默认调
+renew.renew_auth() 免登续期（SSO cookie 长效）并重试一次，无需人工介入。
 """
 import json
 import os
@@ -22,6 +25,12 @@ import requests
 GATEWAY = 'https://tof-gateway.tcl.com'
 TENANT_ID = '18'
 _AUTH_HOST_KEY = 'tof-gateway.tcl.com'
+
+
+def default_auth_file():
+    """续期缓存凭据的默认落点（仓外，不进版本库；renew.py 同用此路径）。"""
+    root = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'tcl-finance-tools'
+    return root / 'tof-auth.json'
 
 
 class TofError(Exception):
@@ -40,9 +49,13 @@ def load_token(auth_file=None):
     env_file = os.environ.get('TOF_AUTH_JSON', '').strip()
     if env_file:
         candidates.append(Path(env_file))
+    candidates.append(default_auth_file())   # renew.py 自动续期的缓存，保持最新
     for p in candidates:
         if p.is_file():
-            auth = json.loads(p.read_text(encoding='utf-8'))
+            try:
+                auth = json.loads(p.read_text(encoding='utf-8-sig'))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue    # 损坏/带 BOM 的凭据文件当作不存在，落到下一级候选
             token = (auth.get('tokens') or {}).get(_AUTH_HOST_KEY) or auth.get('bearerToken') or ''
             if token and not token.lower().startswith('bearer'):
                 token = 'bearer ' + token

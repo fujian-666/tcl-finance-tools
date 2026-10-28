@@ -58,22 +58,34 @@ xfz-survey 逆向调查产物（1989 接口静态目录 + 558 页实测抓包 + 
 - 发送失败不吞：平台写日志 + UI 提示，产物路径仍然可见可下载；
 - 后续 5 张帆软报表迁移沿用同一口径，脚本侧均不实现发送。
 
-### 凭据配置（.env）
+### 凭据配置（.env）与自动续期
 
 ```
 TOF_AUTH_JSON=<xfz-survey>/auth.json     # 或
 TOF_BEARER_TOKEN=<浏览器 devtools 里 Authorization 头的值>
 ```
 
-token 几小时过期；`401/403` 时脚本以退出码 3 结束并提示更新。
+token 几小时过期。**过期不再需要人工更新**：脚本收到 `401/403` 时自动开一次
+后台浏览器免登续期（SSO cookie 长效，机制同 `xfz.py refresh`），拿到新 token
+写回凭据文件并重试一次，全程无需人工介入：
+
+- 凭据读取/写回优先级：`--auth-file` > `TOF_AUTH_JSON` >
+  续期缓存 `%LOCALAPPDATA%\tcl-finance-tools\tof-auth.json` > `TOF_BEARER_TOKEN`；
+  续期永远写回配置指向的文件，没有文件凭据时写缓存（下次运行自动生效）；
+- 浏览器配置目录：`%LOCALAPPDATA%\tcl-finance-tools\tof-profile`（可用
+  `TOF_BROWSER_PROFILE` 覆盖；仓外，不进版本库）。首次续期自动创建；
+- `--no-renew` 关闭自动续期；`--renew-headful` 弹出可见浏览器——仅当
+  **SSO 登录态本身也过期**（少见，浏览器会停在登录页）时用它手动登录一次；
+- 续期失败 → 退出码 3，错误信息含上述操作提示；`renew.py` 也可单独运行调试：
+  `python renew.py [--headful]`。
 
 ## 待办 / 已知边界
 
 - [x] 审批状态筛选：`processStatusCodes`（逗号分隔多值）已实测生效，默认 `30`
 - [x] 产品线/营销组织默认值：`PL002` / `A001040000` 已实测生效
+- [x] token 自动续期：SSO 免登续期 + 过期自动重试（`tof_api/renew.py`）
 - [ ] `companyCode=0528` 单独用（不配 `salesOrgCode`）会带出"宁波"与"惠州酷友"两个法人；
       四条件全加后实测只有宁波法人，无需再收紧
-- [ ] token 自动续期（xfz.py refresh 思路：SSO 长效 cookie 免登换新 token）
 
 ## 其余 TOF 报表工具为何没迁
 
