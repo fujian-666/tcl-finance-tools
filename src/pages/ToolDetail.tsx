@@ -3,7 +3,8 @@ import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { tools } from '../data/tools';
 import StatusBadge from '../components/StatusBadge';
 import { useToast } from '../contexts/ToastContext';
-import { apiFetch, apiFetchWithTimeout } from '../lib/api';
+import { apiFetch } from '../lib/api';
+import { subscribeToolStream, type ToolSnapshot, type ToolStatusEvent } from '../lib/toolStream';
 
 const API_BASE = '';
 
@@ -70,9 +71,8 @@ export default function ToolDetail() {
   const [resultType, setResultType] = useState<'success' | 'error' | null>(null);
   const [callCount, setCallCount] = useState(tool?.callCount || 0);
   const mountedRef = useRef(true);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const logRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamCloseRef = useRef<(() => void) | null>(null);
+  const finishedRef = useRef<string | null>(null);
   const clearResultRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const { addToast } = useToast();
@@ -137,16 +137,15 @@ export default function ToolDetail() {
   } | null>(null);
 
   useEffect(() => {
-    checkInitialStatus();
+    mountedRef.current = true;
+    startStatusStream();
     fetchCallCount();
     return () => {
       mountedRef.current = false;
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (logRef.current) clearInterval(logRef.current);
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      if (streamCloseRef.current) { streamCloseRef.current(); streamCloseRef.current = null; }
       if (clearResultRef.current) clearTimeout(clearResultRef.current);
     };
-    // 初始状态检查仅在挂载时执行一次，函数定义在下方（闭包在渲染后可用）
+    // 订阅仅在挂载时建立一次，函数定义在下方（闭包在渲染后可用）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -158,35 +157,6 @@ export default function ToolDetail() {
     // fetchOAResult 每次渲染重建，加入依赖会导致该 effect 反复执行，故按语义仅依赖触发条件
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resultType, isOA]);
-
-  const checkInitialStatus = async () => {
-    if (!tool) return;
-    try {
-      const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/status`);
-      const data = await res.json();
-      if (!mountedRef.current) return;
-      if (data.running) {
-        setRunning(true);
-        setRunMsg(data.message || '运行中...');
-        startStatusPolling();
-      } else if (data.exitCode !== undefined) {
-        if (data.exitCode === 0) {
-          setResultType('success');
-          setRunMsg(data.message || '已完成');
-          // OA审批：加载已有结果
-          if (isOA) fetchOAResult();
-        } else {
-          setResultType('error');
-          setRunMsg(data.message || '失败');
-        }
-        timerRef.current = setTimeout(() => {
-          if (mountedRef.current) { setResultType(null); setRunMsg(''); }
-        }, 5000);
-      }
-    } catch {
-      // 后端不可用
-    }
-  };
 
   const fetchOAResult = async () => {
     if (!tool) return;
@@ -214,120 +184,88 @@ export default function ToolDetail() {
     }
   };
 
-  const startStatusPolling = () => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    if (logRef.current) clearInterval(logRef.current);
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  /**
+   * 统一终态处理：无论终态来自 SSE 事件还是重连后的快照，都只执行一次。
+   * finishedRef 用结束时间做幂等键，避免快照与事件重复触发弹窗。
+   */
+  const finishRun = (exitCode: number | undefined, message: string, silent = false, endTime?: string) => {
+    if (!mountedRef.current || !tool) return;
+    const key = endTime || `${exitCode}|${message}`;
+    if (finishedRef.current === key) return;
+    finishedRef.current = key;
+    setRunning(false);
 
-    // 5分钟超时 — 防止 close 事件不触发导致状态卡死
-    timeoutRef.current = setTimeout(() => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      if (logRef.current) {
-        clearInterval(logRef.current);
-        logRef.current = null;
-      }
-      if (mountedRef.current) {
-        setRunning(false);
-        setResultType('error');
-        setRunMsg('运行超时，但可能已完成（请检查飞书）');
-        setTimeout(() => {
-          if (mountedRef.current) { setResultType(null); setRunMsg(''); setLogs([]); }
-        }, 8000);
-      }
-    }, 5 * 60 * 1000);
+    if (exitCode === 0) {
+      setResultType('success');
+      setRunMsg(message || '运行完成');
+      if (!silent) addToast({ type: 'success', title: tool.name, message: '运行完成，已导出并发送飞书', duration: 6000 });
+    } else if (exitCode !== undefined) {
+      setResultType('error');
+      setRunMsg(message || '运行失败');
+      if (!silent) addToast({ type: 'error', title: tool.name, message: message || '运行失败，请查看日志', duration: 8000 });
+    } else {
+      setResultType(null);
+      setRunMsg('状态未知（后端可能已重启或无运行记录），请查看日志或重新运行');
+    }
 
-    // 状态轮询（带重试计数和错误处理，一劳永逸）
-    // in-flight 标记：上一轮没回来就跳过本轮，避免请求叠加把浏览器 6 个连接占满
-    let pollFailCount = 0;
-    let statusInFlight = false;
-    let logInFlight = false;
-    const MAX_POLL_FAILS = 5;
-    timerRef.current = setInterval(async () => {
-      if (!tool || statusInFlight) return;
-      statusInFlight = true;
-      try {
-        const res = await apiFetchWithTimeout(`${API_BASE}/api/tools/${tool.id}/status?_t=${Date.now()}`, { cache: 'no-store' }, 8000);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        pollFailCount = 0;
+    fetchCallCount();
+    if (isOA && exitCode === 0) fetchOAResult();
+
+    // 结果保持显示 30 秒
+    if (clearResultRef.current) clearTimeout(clearResultRef.current);
+    clearResultRef.current = setTimeout(() => {
+      if (mountedRef.current) { setResultType(null); setRunMsg(''); setLogs([]); }
+    }, 30000);
+  };
+
+  /**
+   * 用 SSE 流替换原先的 status/logs 双轮询：
+   * 一次长连接承载状态变更与日志增量，后端推进事件即可，前端无需定时拉取。
+   */
+  const startStatusStream = () => {
+    if (!tool) return;
+    if (streamCloseRef.current) {
+      streamCloseRef.current();
+      streamCloseRef.current = null;
+    }
+    streamCloseRef.current = subscribeToolStream(tool.id, {
+      onSnapshot: (snapshot: ToolSnapshot) => {
         if (!mountedRef.current) return;
-        if (!data.running) {
-          if (timerRef.current) clearInterval(timerRef.current);
-          timerRef.current = null;
-          if (logRef.current) { clearInterval(logRef.current); logRef.current = null; }
-          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-          setRunning(false);
-          if (data.exitCode === 0) {
-            setResultType('success');
-            setRunMsg(data.message || '运行完成');
-            addToast({ type: 'success', title: tool.name, message: '运行完成，已导出并发送飞书', duration: 6000 });
-          } else if (data.exitCode !== undefined) {
-            setResultType('error');
-            setRunMsg(data.message || '运行失败');
-            addToast({ type: 'error', title: tool.name, message: data.message || '运行失败，请查看日志', duration: 8000 });
-          } else {
-            // 进程已退出但无 exitCode（可能已完成超过5分钟），视为成功
-            setResultType('success');
-            setRunMsg('已完成（请检查飞书）');
-            addToast({ type: 'success', title: tool.name, message: '任务已完成，请检查飞书通知', duration: 6000 });
-          }
-          // 更新运行次数
-          fetchCallCount();
-          // OA审批：拉取结构化结果
-          if (isOA && data.exitCode === 0) {
-            fetchOAResult();
-          }
-          // 结果保持显示30秒
-          if (clearResultRef.current) clearTimeout(clearResultRef.current);
-          clearResultRef.current = setTimeout(() => {
-            if (mountedRef.current) { setResultType(null); setRunMsg(''); setLogs([]); }
-          }, 30000);
+        setLogs(snapshot.logs || []);
+        if (snapshot.running) {
+          setRunning(true);
+          setResultType(null);
+          setRunMsg(snapshot.message || '运行中...');
+        } else if (snapshot.message) {
+          // 重连/刷新时补齐终态，静默（不重复弹 toast）
+          finishRun(snapshot.exitCode, snapshot.message, true, snapshot.endTime);
+        }
+      },
+      onLog: (line: string) => {
+        if (!mountedRef.current) return;
+        setLogs((prev) => {
+          const next = [...prev, line];
+          return next.length > 2000 ? next.slice(-2000) : next;
+        });
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+        }
+      },
+      onStatus: (status: ToolStatusEvent) => {
+        if (!mountedRef.current) return;
+        if (status.running) {
+          setRunning(true);
+          setResultType(null);
+          setRunMsg(status.message || '运行中...');
         } else {
-          setRunMsg(data.message || '运行中...');
+          finishRun(status.exitCode, status.message || '', false, status.endTime);
         }
-      } catch (e) {
-        pollFailCount++;
-        console.error(`[StatusPoll] Fetch error (${pollFailCount}/${MAX_POLL_FAILS}):`, e);
-        if (pollFailCount >= MAX_POLL_FAILS) {
-          // 连续失败太多次，停止轮询并提示用户
-          if (timerRef.current) clearInterval(timerRef.current);
-          timerRef.current = null;
-          if (logRef.current) { clearInterval(logRef.current); logRef.current = null; }
-          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-          if (mountedRef.current) {
-            setRunning(false);
-            setResultType('error');
-            setRunMsg('后端连接失败，请刷新页面重试');
-            addToast({ type: 'error', title: tool.name, message: '后端连接失败，请刷新页面后重试', duration: 8000 });
-          }
-        }
-      } finally {
-        statusInFlight = false;
-      }
-    }, 2000) as unknown as ReturnType<typeof setTimeout>;
-
-    logRef.current = setInterval(async () => {
-      if (!tool || logInFlight) return;
-      logInFlight = true;
-      try {
-        const res = await apiFetchWithTimeout(`${API_BASE}/api/tools/${tool.id}/logs`, {}, 8000);
-        const data = await res.json();
-        if (!mountedRef.current) return;
-        if (data.logs && data.logs.length > 0) {
-          setLogs(data.logs);
-          if (logContainerRef.current) {
-            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-          }
-        }
-      } catch (e) {
-        console.error('[LogPoll] Fetch error:', e);
-      } finally {
-        logInFlight = false;
-      }
-    }, 1000);
+      },
+      onError: (_err: Error, attempt: number) => {
+        if (!mountedRef.current || attempt < 2) return;
+        setRunMsg('反馈连接中断，正在自动重连…');
+      },
+    });
   };
 
   const handleRun = async () => {
@@ -396,7 +334,8 @@ export default function ToolDetail() {
           message: data.message || '已启动',
           duration: 4000,
         });
-        startStatusPolling();
+        finishedRef.current = null;
+        startStatusStream();
       } else {
         setResultType('error');
         setRunMsg(data.error || '启动失败');

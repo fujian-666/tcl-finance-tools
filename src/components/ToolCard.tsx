@@ -5,6 +5,7 @@ import StatusBadge from './StatusBadge';
 import { useToast } from '../contexts/ToastContext';
 
 import { apiFetch } from '../lib/api';
+import { subscribeToolStream, type ToolSnapshot, type ToolStatusEvent } from '../lib/toolStream';
 
 const API_BASE = '';
 
@@ -80,9 +81,9 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
   const [resultType, setResultType] = useState<'success' | 'error' | null>(null);
   const [callCount, setCallCount] = useState(tool.callCount);
   const mountedRef = useRef(true);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const logRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamCloseRef = useRef<(() => void) | null>(null);
+  const monitorPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const finishedRef = useRef<string | null>(null);
   const clearResultRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const { addToast } = useToast();
@@ -102,119 +103,95 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
     }
   }, [tool.id]);
 
-  const startStatusPolling = useCallback(() => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (logRef.current) clearInterval(logRef.current);
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  /**
+   * 统一终态处理：SSE 事件与重连快照都走这里，finishedRef 以结束时间做幂等键。
+   */
+  const finishRun = useCallback((exitCode: number | undefined, msg: string, silent = false, endTime?: string) => {
+    if (!mountedRef.current) return;
+    const key = endTime || `${exitCode}|${msg}`;
+    if (finishedRef.current === key) return;
+    finishedRef.current = key;
+    setRunning(false);
 
-    // 5分钟超时 — 防止 close 事件不触发导致状态卡死
-    timeoutRef.current = setTimeout(() => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      if (logRef.current) {
-        clearInterval(logRef.current);
-        logRef.current = null;
-      }
-      if (mountedRef.current) {
-        setRunning(false);
-        setResultType('error');
-        setMessage('运行超时，但可能已完成（请检查飞书）');
-        setTimeout(() => {
-          if (mountedRef.current) { setResultType(null); setMessage(''); setLogs([]); }
-        }, 8000);
-      }
-    }, 5 * 60 * 1000);
+    if (exitCode === 0) {
+      setResultType('success');
+      setMessage(msg || '运行完成');
+      if (!silent) addToast({ type: 'success', title: tool.name, message: '运行完成，已导出并发送飞书', duration: 6000 });
+    } else if (exitCode !== undefined) {
+      setResultType('error');
+      setMessage(msg || '运行失败');
+      if (!silent) addToast({ type: 'error', title: tool.name, message: msg || '运行失败，请查看日志', duration: 8000 });
+    } else {
+      setResultType(null);
+      setMessage('状态未知（后端可能已重启或无运行记录），请刷新或重新运行');
+    }
 
-    // 状态轮询（带重试计数和错误处理，一劳永逸）
-    let pollFailCount = 0;
-    const MAX_POLL_FAILS = 5;
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/status?_t=${Date.now()}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        pollFailCount = 0;
+    fetchCallCount();
+    if (clearResultRef.current) clearTimeout(clearResultRef.current);
+    clearResultRef.current = setTimeout(() => {
+      if (mountedRef.current) { setResultType(null); setMessage(''); setLogs([]); }
+    }, 30000);
+  }, [tool.name, addToast, fetchCallCount]);
+
+  /**
+   * 仅在卡片的工具真正运行时才建立 SSE 连接：
+   * 首页有多张卡片，若每张都常开长连接会占满浏览器同源 6 个连接，反而更卡。
+   */
+  const startStatusStream = useCallback(() => {
+    if (streamCloseRef.current) {
+      streamCloseRef.current();
+      streamCloseRef.current = null;
+    }
+    streamCloseRef.current = subscribeToolStream(tool.id, {
+      onSnapshot: (snapshot: ToolSnapshot) => {
         if (!mountedRef.current) return;
-        if (!data.running) {
-          clearInterval(pollRef.current!);
-          pollRef.current = null;
-          clearInterval(logRef.current!);
-          logRef.current = null;
-          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-          setRunning(false);
-          if (data.exitCode === 0) {
-            setResultType('success');
-            setMessage(data.message || '运行完成');
-            addToast({ type: 'success', title: tool.name, message: '运行完成，已导出并发送飞书', duration: 6000 });
-          } else if (data.exitCode !== undefined) {
-            setResultType('error');
-            setMessage(data.message || '运行失败');
-            addToast({ type: 'error', title: tool.name, message: data.message || '运行失败，请查看日志', duration: 8000 });
-          } else {
-            // 进程已退出但无 exitCode（可能已完成超过5分钟），视为成功
-            setResultType('success');
-            setMessage('已完成（请检查飞书）');
-            addToast({ type: 'success', title: tool.name, message: '任务已完成，请检查飞书通知', duration: 6000 });
-          }
-          fetchCallCount();
-          if (clearResultRef.current) clearTimeout(clearResultRef.current);
-          clearResultRef.current = setTimeout(() => {
-            if (mountedRef.current) { setResultType(null); setMessage(''); setLogs([]); }
-          }, 30000);
+        setLogs(snapshot.logs || []);
+        if (snapshot.running) {
+          setRunning(true);
+          setResultType(null);
+          setMessage(snapshot.message || '运行中...');
+        } else if (snapshot.message) {
+          finishRun(snapshot.exitCode, snapshot.message, true, snapshot.endTime);
+        }
+      },
+      onLog: (line: string) => {
+        if (!mountedRef.current) return;
+        setLogs((prev) => {
+          const next = [...prev, line];
+          return next.length > 2000 ? next.slice(-2000) : next;
+        });
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+        }
+      },
+      onStatus: (status: ToolStatusEvent) => {
+        if (!mountedRef.current) return;
+        if (status.running) {
+          setRunning(true);
+          setResultType(null);
+          setMessage(status.message || '运行中...');
         } else {
-          setMessage(data.message || '运行中...');
+          finishRun(status.exitCode, status.message || '', false, status.endTime);
         }
-      } catch (e) {
-        pollFailCount++;
-        console.error(`[StatusPoll] Fetch error (${pollFailCount}/${MAX_POLL_FAILS}):`, e);
-        if (pollFailCount >= MAX_POLL_FAILS) {
-          // 连续失败太多次，停止轮询并提示用户
-          clearInterval(pollRef.current!);
-          pollRef.current = null;
-          clearInterval(logRef.current!);
-          logRef.current = null;
-          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-          if (mountedRef.current) {
-            setRunning(false);
-            setResultType('error');
-            setMessage('后端连接失败，请刷新页面重试');
-            addToast({ type: 'error', title: tool.name, message: '后端连接失败，请刷新页面后重试', duration: 8000 });
-          }
-        }
-      }
-    }, 2000);
-
-    // 日志轮询
-    logRef.current = setInterval(async () => {
-      try {
-        const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/logs`);
-        const data = await res.json();
-        if (!mountedRef.current) return;
-        if (data.logs && data.logs.length > 0) {
-          setLogs(data.logs);
-          // 自动滚动到底部
-          if (logContainerRef.current) {
-            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-          }
-        }
-      } catch (e) {
-        console.error('[LogPoll] Fetch error:', e);
-      }
-    }, 1000);
-  }, [tool.id, tool.name, addToast, fetchCallCount]);
+      },
+      onError: (_err: Error, attempt: number) => {
+        if (!mountedRef.current || attempt < 2) return;
+        setMessage('反馈连接中断，正在自动重连…');
+      },
+    });
+  }, [tool.id, finishRun]);
 
   const checkInitialStatus = useCallback(async () => {
     try {
       const res = await apiFetch(`${API_BASE}/api/tools/${tool.id}/status`);
       const data = await res.json();
-      if (data.running && mountedRef.current) {
+      if (!mountedRef.current) return;
+      if (data.running) {
         setRunning(true);
         setMessage(data.message || '运行中...');
-        startStatusPolling();
-      } else if (data.exitCode !== undefined && mountedRef.current) {
-        // 有完成记录，显示结果
+        // 正在运行：接上事件流，把已有日志和后续增量一起补齐
+        startStatusStream();
+      } else if (data.exitCode !== undefined) {
         if (data.exitCode === 0) {
           setResultType('success');
           setMessage(data.message || '已完成');
@@ -226,8 +203,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
         setTimeout(() => {
           if (mountedRef.current) { setResultType(null); setMessage(''); }
         }, 5000);
-      } else if (mountedRef.current) {
-        // 后端无运行中进程也无历史记录 → 确保前端显示 idle
+      } else {
         setRunning(false);
         setResultType(null);
         setMessage('');
@@ -240,10 +216,11 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
         setMessage('');
       }
     }
-  }, [tool.id, startStatusPolling]);
+  }, [tool.id, startStatusStream]);
 
   // 检查工具初始状态
   useEffect(() => {
+    mountedRef.current = true;
     // 延迟到 effect 提交后异步执行，避免在 effect 体内同步 setState
     const timer = setTimeout(() => {
       checkInitialStatus();
@@ -252,17 +229,13 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
     return () => {
       clearTimeout(timer);
       mountedRef.current = false;
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
+      if (streamCloseRef.current) {
+        streamCloseRef.current();
+        streamCloseRef.current = null;
       }
-      if (logRef.current) {
-        clearInterval(logRef.current);
-        logRef.current = null;
-      }
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
+      if (monitorPollRef.current) {
+        clearInterval(monitorPollRef.current);
+        monitorPollRef.current = null;
       }
       if (clearResultRef.current) {
         clearTimeout(clearResultRef.current);
@@ -368,7 +341,7 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
               }
             }
           }, 5000);
-          pollRef.current = poll;
+          monitorPollRef.current = poll;
         } else if (isInvoiceOcr) {
           if (data.url) {
             setOcrUrl(data.url);
@@ -380,7 +353,8 @@ export default function ToolCard({ tool, index }: ToolCardProps) {
           }
         } else {
           setMessage('运行中...');
-          startStatusPolling();
+          finishedRef.current = null;
+          startStatusStream();
         }
       } else {
         setResultType('error');
