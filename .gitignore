@@ -19,6 +19,7 @@ oa_browser_data2/
 call_counts.json
 monitor_data.json
 deepseek_monitor.log
+.run-pids.json
 
 # 系统与编辑器
 .DS_Store
